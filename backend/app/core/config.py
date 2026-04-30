@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     llm_proxy_address: str = ""
     llm_api_key: str = ""
     llm_request_timeout: float = 300.0  # seconds
+    # Streaming idle-timeout: max seconds to wait between two consecutive
+    # SSE chunks before declaring the stream stalled. httpx's per-read
+    # timeout doesn't catch this — a server that keeps the TCP connection
+    # alive without sending data appears healthy. Idle timeouts surface
+    # the silent-hang case so retry/resume can take over.
+    llm_stream_idle_timeout: float = 60.0  # seconds
+    # Maximum seconds to wait for the stream context to open (request
+    # accepted + first byte of response back). Tighter than the chunk-idle
+    # timeout because nothing useful is happening yet — if the SDK can't
+    # establish the stream in this window, retry rather than wait.
+    llm_stream_first_byte_timeout: float = 30.0  # seconds
 
     # Model configuration
     model_name: str = "claude-opus-4-7"

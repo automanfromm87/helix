@@ -17,8 +17,10 @@ Long-running properties enabled by default:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from contextlib import AsyncExitStack
 from functools import lru_cache
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -26,6 +28,7 @@ import anthropic
 import httpx
 
 from app.core.config import get_settings
+from app.domain.services.agents.protection import LLMTransportError
 
 logger = logging.getLogger(__name__)
 
@@ -193,12 +196,45 @@ async def complete_stream(
         params["temperature"] = settings.temperature
 
     started = time.monotonic()
+    idle_timeout = settings.llm_stream_idle_timeout
+    first_byte_timeout = settings.llm_stream_first_byte_timeout
     # Don't repeatedly join the chunk list — quadratic on large outputs.
     # Consumers that need the prefix can compute it themselves; emitting the
     # incremental chunk is enough for streamed UI rendering.
+    #
+    # Two timeouts cover the two stall modes Anthropic streams can hit:
+    #   * `first_byte_timeout` — `__aenter__()` hung: server hasn't even
+    #     accepted the request yet (proxy issue, queueing, big-cache key
+    #     compute, etc.).
+    #   * `idle_timeout` — stream open but server gone silent mid-response.
+    # `AsyncExitStack` ensures the stream is properly closed if either
+    # timeout fires, so we don't leak the underlying httpx connection.
     try:
-        async with stream_ctx(**params) as stream:
-            async for event in stream:
+        async with AsyncExitStack() as stack:
+            try:
+                stream = await asyncio.wait_for(
+                    stack.enter_async_context(stream_ctx(**params)),
+                    timeout=first_byte_timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                raise LLMTransportError(
+                    f"first-byte idle for >{first_byte_timeout:.0f}s",
+                    cause=exc,
+                ).with_retry_after(2.0)
+
+            stream_iter = stream.__aiter__()
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        stream_iter.__anext__(), timeout=idle_timeout,
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    raise LLMTransportError(
+                        f"streaming idle for >{idle_timeout:.0f}s",
+                        cause=exc,
+                    ).with_retry_after(2.0)
                 if getattr(event, "type", None) != "content_block_delta":
                     continue
                 delta = getattr(event, "delta", None)
@@ -207,7 +243,15 @@ async def complete_stream(
                 chunk = getattr(delta, "text", "") or ""
                 if chunk:
                     yield {"type": "text_delta", "text": chunk}
-            final_msg = await stream.get_final_message()
+            try:
+                final_msg = await asyncio.wait_for(
+                    stream.get_final_message(), timeout=idle_timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                raise LLMTransportError(
+                    f"final-message idle for >{idle_timeout:.0f}s",
+                    cause=exc,
+                ).with_retry_after(2.0)
         payload = (
             final_msg.model_dump() if hasattr(final_msg, "model_dump") else dict(final_msg)
         )
