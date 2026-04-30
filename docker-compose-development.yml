@@ -1,0 +1,122 @@
+name: helix
+services:
+  frontend-dev:
+    build:
+      context: ./ui/www
+      dockerfile: Dockerfile
+      target: build-stage  # Use build stage image instead of production image
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5174"]
+    volumes:
+      - ./ui/www:/app  # Mount source code directory
+      - /app/node_modules  # Avoid overwriting container's node_modules
+    ports:
+      - "5174:5174"  # Vite dev port for the React UI
+    environment:
+      - NODE_ENV=development
+      #- VITE_API_URL=http://127.0.0.1:8000
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - helix-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command:
+      [
+        "uv", "run", 
+        "debugpy", "--listen", "0.0.0.0:5678", "-m", # Enable debug
+        "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload",
+        "--timeout-graceful-shutdown","0"
+      ]
+    volumes:
+      - ./backend:/app  # Mount source code directory
+      #- ./mcp.json:/etc/mcp.json # Mount MCP servers directory
+      # Docker socket is RW so the backend can spawn per-session sandbox
+      # containers via the docker SDK. (`:ro` would block create/start.)
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /app/__pycache__  # Avoid overwriting cache files
+      - /app/.venv  # Avoid overwriting virtual environment
+    ports:
+      - "8000:8000"
+      - "5678:5678" # Debug port
+    depends_on:
+      postgres:
+        condition: service_started
+        required: true
+    restart: unless-stopped
+    networks:
+      - helix-network
+    env_file:
+      - .env
+    # NOTE: SANDBOX_ADDRESS is intentionally NOT set here.
+    # When unset, DockerSandbox.create() spawns a fresh container per
+    # session (image: $SANDBOX_IMAGE, network: $SANDBOX_NETWORK), giving
+    # each chat its own isolated /home/ubuntu, processes, and ports.
+    # Orphan containers are reaped at backend startup + by the janitor.
+
+  # Standalone shared-sandbox service. Kept under a `legacy` profile so it
+  # builds the `helix-sandbox` image (used by per-session spawn) but does
+  # NOT auto-start. Run `./dev.sh build sandbox` to refresh the image.
+  sandbox:
+    profiles: ["legacy"]
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+      tags:
+        - helix-sandbox:latest
+    hostname: sandbox
+    volumes:
+      - ./sandbox:/app
+      - ./sandbox/supervisord.conf:/etc/supervisor/conf.d/app.conf
+      - /app/__pycache__
+      - /app/.venv
+    ports:
+      - "5902:5900"
+      - "8080:8080"
+    environment:
+      - UVI_ARGS="--reload"
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+    networks:
+      - helix-network
+
+  mockserver:
+    build:
+      context: ./mockserver
+      dockerfile: Dockerfile
+    volumes:
+      - ./mockserver:/app  # Mount source code directory
+      - /app/__pycache__  # Avoid overwriting cache files
+      - /app/.venv  # Avoid overwriting virtual environment
+    restart: unless-stopped
+    environment:
+      - MOCK_DATA_FILE=default.yaml
+      - MOCK_DELAY=1
+    networks:
+      - helix-network
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=helix
+      - POSTGRES_PASSWORD=helix
+      - POSTGRES_DB=helix
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    networks:
+      - helix-network
+
+volumes:
+  postgres_data:
+    name: helix-postgres-data
+
+networks:
+  helix-network:
+    name: helix-network
+    driver: bridge

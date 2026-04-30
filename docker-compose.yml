@@ -1,0 +1,76 @@
+name: helix
+services:
+  frontend:
+    image: ${IMAGE_REGISTRY:-simpleyyt}/helix-frontend:${IMAGE_TAG:-latest}
+    build:
+      context: ./ui/www
+      dockerfile: Dockerfile
+      x-bake:
+        platforms:
+          - linux/amd64
+          - linux/arm64
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - helix-network
+    environment:
+      - BACKEND_URL=http://backend:8000
+
+  backend:
+    image: ${IMAGE_REGISTRY:-simpleyyt}/helix-backend:${IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      x-bake:
+        platforms:
+          - linux/amd64
+          - linux/arm64
+    depends_on:
+      - sandbox
+      - postgres
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      #- ./mcp.json:/etc/mcp.json # Mount MCP servers directory
+    networks:
+      - helix-network
+    env_file:
+      - .env
+
+  sandbox:
+    image: ${IMAGE_REGISTRY:-simpleyyt}/helix-sandbox:${IMAGE_TAG:-latest}
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+      x-bake:
+        platforms:
+          - linux/amd64
+          - linux/arm64
+    command: /bin/sh -c "exit 0"  # prevent sandbox from starting, ensure image is pulled
+    restart: "no"
+    networks:
+      - helix-network
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=helix
+      - POSTGRES_PASSWORD=helix
+      - POSTGRES_DB=helix
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - helix-network
+
+volumes:
+  postgres_data:
+    name: helix-postgres-data
+
+networks:
+  helix-network:
+    name: helix-network
+    driver: bridge

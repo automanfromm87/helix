@@ -1,0 +1,733 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import {
+  ArrowDown,
+  Check,
+  FileSearch,
+  Globe,
+  Link as LinkIcon,
+  Lock,
+  PanelLeft,
+} from 'lucide-react'
+
+import * as agentApi from '@/api/agent'
+import {
+  isConsecutiveAssistant,
+  type AttachmentsContent,
+  type Message,
+  type MessageContent,
+  type TaskContent,
+  type ToolContent,
+} from '@/types/message'
+import {
+  type AgentSSEEvent,
+  type ErrorEventData,
+  type MessageEventData,
+  type PlanEventData,
+  type TaskEventData,
+  type TitleEventData,
+  type ToolEventData,
+} from '@/types/event'
+import type { FileInfo } from '@/api/file'
+import { SessionStatus } from '@/types/response'
+import ChatBox from '@/components/ChatBox'
+import ChatMessage from '@/components/ChatMessage'
+import LoadingIndicator from '@/components/ui/LoadingIndicator'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover'
+import PlanPanel from '@/components/PlanPanel'
+import { ShareIcon } from '@/components/icons'
+import { SimpleBar, type SimpleBarHandle } from '@/components/ui/SimpleBar'
+import ToolPanel, { type ToolPanelHandle } from '@/components/ToolPanel'
+import { useFilePanel } from '@/hooks/useFilePanel'
+import { useLeftPanel } from '@/hooks/useLeftPanel'
+import { useSessionFileList } from '@/hooks/useSessionFileList'
+import { copyToClipboard } from '@/utils/dom'
+import { showErrorToast, showSuccessToast } from '@/utils/toast'
+import { cn } from '@/lib/utils'
+
+export default function ChatPage() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const { sessionId: routeSessionId } = useParams<{ sessionId: string }>()
+  const isLeftPanelShow = useLeftPanel((s) => s.isLeftPanelShow)
+  const toggleLeftPanel = useLeftPanel((s) => s.toggleLeftPanel)
+  const showSessionFileList = useSessionFileList((s) => s.showSessionFileList)
+  const hideFilePanel = useFilePanel((s) => s.hideFilePanel)
+
+  const [inputMessage, setInputMessage] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+  const [messages, setMessages] = useState<Message[]>([])
+  const [realTime, setRealTime] = useState(true)
+  const [follow, setFollow] = useState(true)
+  const [title, setTitle] = useState('New Chat')
+  const [plan, setPlan] = useState<PlanEventData | undefined>(undefined)
+  const [attachments, setAttachments] = useState<FileInfo[]>([])
+  const [shareMode, setShareMode] = useState<'private' | 'public'>('private')
+  const [linkCopied, setLinkCopied] = useState(false)
+  const [sharingLoading, setSharingLoading] = useState(false)
+
+  const lastNoMessageTool = useRef<ToolContent | undefined>()
+  const lastTool = useRef<ToolContent | undefined>()
+  const lastEventId = useRef<string | undefined>()
+  const cancelCurrentChat = useRef<(() => void) | null>(null)
+  const toolPanel = useRef<ToolPanelHandle>(null)
+  const simpleBarRef = useRef<SimpleBarHandle>(null)
+  // True only while restoreSession is synchronously replaying historical
+  // events. Kept distinct from `realTime` (which also flips when the user
+  // clicks a tool to view history) so terminal events from a live agent
+  // still tear down the loading spinner correctly.
+  const replayingRef = useRef(false)
+
+  const sessionId = routeSessionId
+
+  const isLastNoMessageTool = useCallback(
+    (tool: ToolContent) => tool.tool_call_id === lastNoMessageTool.current?.tool_call_id,
+    [],
+  )
+
+  const isLiveTool = useCallback(
+    (tool: ToolContent) => {
+      if (tool.status === 'calling') return true
+      if (!isLastNoMessageTool(tool)) return false
+      return tool.timestamp > Date.now() - 5 * 60 * 1000
+    },
+    [isLastNoMessageTool],
+  )
+
+  const handleMessageEvent = useCallback((data: MessageEventData) => {
+    setMessages((prev) => {
+      // Streaming: incremental emissions of the same logical assistant turn
+      // share `message_id`. Replace the existing bubble in place rather than
+      // appending a new one. The final emit (partial=false) freezes the text.
+      if (data.message_id) {
+        const idx = prev.findIndex(
+          (m) =>
+            m.type === data.role &&
+            (m.content as MessageContent).message_id === data.message_id,
+        )
+        if (idx >= 0) {
+          const next = [...prev]
+          next[idx] = { type: data.role, content: { ...data } as MessageContent } as Message
+          return next
+        }
+      }
+      const next = [
+        ...prev,
+        { type: data.role, content: { ...data } as MessageContent } as Message,
+      ]
+      if (data.attachments?.length > 0) {
+        next.push({ type: 'attachments', content: { ...data } as AttachmentsContent })
+      }
+      return next
+    })
+  }, [])
+
+  const handleToolEvent = useCallback(
+    (data: ToolEventData) => {
+      const toolContent: ToolContent = { ...data }
+
+      setMessages((prev) => {
+        const next = [...prev]
+        const existing = lastTool.current
+        if (existing && existing.tool_call_id === toolContent.tool_call_id) {
+          // mutate the last tool reference in-place across the message tree.
+          Object.assign(existing, toolContent)
+          return next.slice()
+        }
+        // Tools belong to the most recent in-flight task (status=running).
+        const lastTask = [...next].reverse().find((m) => m.type === 'task')?.content as
+          | TaskContent
+          | undefined
+        if (lastTask && lastTask.status === 'running') {
+          lastTask.tools.push(toolContent)
+        } else {
+          next.push({ type: 'tool', content: toolContent })
+        }
+        return next
+      })
+      lastTool.current = toolContent
+
+      if (toolContent.name !== 'message') {
+        lastNoMessageTool.current = toolContent
+        if (realTime) toolPanel.current?.showToolPanel(toolContent, true)
+      }
+    },
+    [realTime],
+  )
+
+  const handleTaskEvent = useCallback((data: TaskEventData) => {
+    setMessages((prev) => {
+      const next = [...prev]
+      // Each task gets exactly one bubble in the chat — find it and update,
+      // or insert if this is the first event for that task_id.
+      const idx = next.findIndex(
+        (m) =>
+          m.type === 'task' &&
+          (m.content as TaskContent).task_id === data.task_id,
+      )
+      if (idx >= 0) {
+        const existing = next[idx].content as TaskContent
+        Object.assign(existing, {
+          status: data.status,
+          title: data.title,
+          details: data.details,
+          result: data.result ?? existing.result,
+          error: data.error ?? existing.error,
+        })
+        return next.slice()
+      }
+      next.push({
+        type: 'task',
+        content: {
+          task_id: data.task_id,
+          plan_id: data.plan_id,
+          position: data.position,
+          title: data.title,
+          details: data.details ?? null,
+          status: data.status,
+          result: data.result ?? null,
+          error: data.error ?? null,
+          tools: [],
+          timestamp: data.timestamp,
+        } as TaskContent,
+      })
+      return next
+    })
+  }, [])
+
+  const handleErrorEvent = useCallback((data: ErrorEventData) => {
+    setIsLoading(false)
+    // Surface errors as a clearly-marked assistant message so they don't blend
+    // in with normal output.
+    setMessages((prev) => [
+      ...prev,
+      {
+        type: 'assistant',
+        content: {
+          content: `**⚠️ Error**\n\n${data.error}`,
+          timestamp: data.timestamp,
+        } as MessageContent,
+      },
+    ])
+  }, [])
+
+  const handleEvent = useCallback(
+    (event: AgentSSEEvent) => {
+      switch (event.event) {
+        case 'message':
+          handleMessageEvent(event.data as MessageEventData)
+          break
+        case 'tool':
+          handleToolEvent(event.data as ToolEventData)
+          break
+        case 'task':
+          handleTaskEvent(event.data as TaskEventData)
+          break
+        case 'error':
+          handleErrorEvent(event.data as ErrorEventData)
+          break
+        case 'title':
+          setTitle((event.data as TitleEventData).title)
+          break
+        case 'plan':
+          setPlan(event.data as PlanEventData)
+          break
+        case 'done':
+        case 'wait':
+          // Explicit terminal events — sse-starlette keeps the SSE open with
+          // keep-alive pings, so onClose isn't reliable. Skip during replay
+          // so an old `done` event in session history doesn't cancel the
+          // brand-new chat() SSE that just started.
+          if (!replayingRef.current) {
+            setIsLoading(false)
+            cancelCurrentChat.current?.()
+            cancelCurrentChat.current = null
+          }
+          break
+        default:
+          break
+      }
+      lastEventId.current = event.data.event_id
+    },
+    [handleMessageEvent, handleToolEvent, handleTaskEvent, handleErrorEvent],
+  )
+
+  const chat = useCallback(
+    async (message = '', files: FileInfo[] = []) => {
+      if (!sessionId) return
+      cancelCurrentChat.current?.()
+      cancelCurrentChat.current = null
+
+      if (message.trim()) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            type: 'user',
+            content: {
+              content: message,
+              timestamp: Math.floor(Date.now() / 1000),
+            } as MessageContent,
+          },
+        ])
+      }
+      if (files.length > 0) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            type: 'attachments',
+            content: { role: 'user', attachments: files } as AttachmentsContent,
+          },
+        ])
+      }
+
+      setFollow(true)
+      setInputMessage('')
+      setAttachments([])
+      setIsLoading(true)
+
+      try {
+        const cancel = await agentApi.chatWithSession(
+          sessionId,
+          message,
+          lastEventId.current,
+          files.map((f) => ({ file_id: f.file_id, filename: f.filename })),
+          {
+            onOpen: () => {
+              console.debug('[chat SSE] open')
+              setIsLoading(true)
+            },
+            onMessage: ({ event, data }) => {
+              console.debug('[chat SSE]', event, data)
+              handleEvent({
+                event: event as AgentSSEEvent['event'],
+                data: data as AgentSSEEvent['data'],
+              })
+            },
+            onClose: () => {
+              console.debug('[chat SSE] close')
+              setIsLoading(false)
+              cancelCurrentChat.current = null
+            },
+            onError: (e) => {
+              console.error('[chat SSE] error', e)
+              setIsLoading(false)
+              cancelCurrentChat.current = null
+            },
+          },
+        )
+        cancelCurrentChat.current = cancel
+      } catch (e) {
+        console.error('Chat error:', e)
+        setIsLoading(false)
+        cancelCurrentChat.current = null
+      }
+    },
+    [sessionId, handleEvent],
+  )
+
+  const handleEditUserMessage = useCallback(
+    async (eventId: string, newMessage: string) => {
+      if (!sessionId) return
+      // Drop everything from the edited message onward locally so the panel
+      // doesn't briefly show stale assistant output while the network call
+      // truncates server-side.
+      setMessages((prev) => {
+        const idx = prev.findIndex(
+          (m) => m.type === 'user' && (m.content as MessageContent).event_id === eventId,
+        )
+        return idx >= 0 ? prev.slice(0, idx) : prev
+      })
+      lastEventId.current = ''
+      lastTool.current = undefined
+      lastNoMessageTool.current = undefined
+      try {
+        await agentApi.regenerateFromMessage(sessionId, eventId, newMessage)
+      } catch (e) {
+        console.error('Failed to regenerate:', e)
+        showErrorToast('Failed to regenerate')
+        return
+      }
+      void chat(newMessage, [])
+    },
+    [sessionId, chat],
+  )
+
+  const restoreSession = useCallback(async () => {
+    if (!sessionId) return
+    try {
+      const session = await agentApi.getSession(sessionId)
+      setShareMode(session.is_shared ? 'public' : 'private')
+      setRealTime(false)
+      // Synchronous ref so the for-loop's done/wait events don't tear down
+      // the live chat connection. setState wouldn't apply until next render.
+      replayingRef.current = true
+      try {
+        for (const event of session.events) handleEvent(event)
+      } finally {
+        replayingRef.current = false
+      }
+      setRealTime(true)
+      if (
+        session.status === SessionStatus.RUNNING ||
+        session.status === SessionStatus.PENDING
+      ) {
+        await chat()
+      }
+      void agentApi.clearUnreadMessageCount(sessionId)
+    } catch (e) {
+      console.error('Failed to restore session:', e)
+      showErrorToast('Session not found')
+    }
+  }, [sessionId, handleEvent, chat])
+
+  // Reset on session change.
+  useEffect(() => {
+    cancelCurrentChat.current?.()
+    cancelCurrentChat.current = null
+    setMessages([])
+    setPlan(undefined)
+    setTitle('New Chat')
+    setAttachments([])
+    setShareMode('private')
+    setLinkCopied(false)
+    setRealTime(true)
+    setFollow(true)
+    lastTool.current = undefined
+    lastNoMessageTool.current = undefined
+    lastEventId.current = undefined
+    toolPanel.current?.hideToolPanel()
+    hideFilePanel()
+
+    const navState = (location.state as { message?: string; files?: FileInfo[] } | null) ?? null
+    if (navState?.message) {
+      window.history.replaceState({}, document.title)
+      void chat(navState.message, navState.files ?? [])
+    } else {
+      void restoreSession()
+    }
+
+    return () => {
+      cancelCurrentChat.current?.()
+      cancelCurrentChat.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
+
+  // Auto-scroll on new message when in follow mode.
+  useEffect(() => {
+    if (follow) {
+      requestAnimationFrame(() => simpleBarRef.current?.scrollToBottom())
+    }
+  }, [messages, follow])
+
+  const handleScroll = () => {
+    setFollow(simpleBarRef.current?.isScrolledToBottom() ?? false)
+  }
+
+  const handleFollow = () => {
+    setFollow(true)
+    simpleBarRef.current?.scrollToBottom()
+  }
+
+  const handleStop = () => {
+    if (sessionId) void agentApi.stopSession(sessionId)
+  }
+
+  const handleToolClick = (tool: ToolContent) => {
+    setRealTime(false)
+    if (sessionId) toolPanel.current?.showToolPanel(tool, isLiveTool(tool))
+  }
+
+  const jumpToRealTime = () => {
+    setRealTime(true)
+    if (lastNoMessageTool.current) {
+      toolPanel.current?.showToolPanel(
+        lastNoMessageTool.current,
+        isLiveTool(lastNoMessageTool.current),
+      )
+    }
+  }
+
+  const handleShareModeChange = async (mode: 'private' | 'public') => {
+    if (!sessionId || sharingLoading) return
+    if (shareMode === mode) {
+      setLinkCopied(false)
+      return
+    }
+    try {
+      setSharingLoading(true)
+      if (mode === 'public') await agentApi.shareSession(sessionId)
+      else await agentApi.unshareSession(sessionId)
+      setShareMode(mode)
+      setLinkCopied(false)
+    } catch (e) {
+      console.error('Error changing share mode:', e)
+      showErrorToast('Failed to change sharing settings')
+    } finally {
+      setSharingLoading(false)
+    }
+  }
+
+  const handleInstantShare = async () => {
+    if (!sessionId) return
+    setSharingLoading(true)
+    try {
+      await agentApi.shareSession(sessionId)
+      setShareMode('public')
+      setLinkCopied(false)
+    } catch (e) {
+      console.error('Error sharing session:', e)
+      showErrorToast('Failed to share session')
+    } finally {
+      setSharingLoading(false)
+    }
+  }
+
+  const handleCopyLink = async () => {
+    if (!sessionId) return
+    const shareUrl = `${window.location.origin}/share/${sessionId}`
+    const ok = await copyToClipboard(shareUrl)
+    if (ok) {
+      setLinkCopied(true)
+      window.setTimeout(() => setLinkCopied(false), 3000)
+      showSuccessToast('Link copied to clipboard')
+    } else {
+      showErrorToast('Failed to copy link')
+    }
+  }
+
+  const renderedMessages = useMemo(() => {
+    return messages.map((message, index) => (
+      <ChatMessage
+        key={index}
+        message={message}
+        hideHeader={isConsecutiveAssistant(messages, index)}
+        onToolClick={handleToolClick}
+        onEditUserMessage={handleEditUserMessage}
+      />
+    ))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, handleEditUserMessage])
+
+  return (
+    <SimpleBar ref={simpleBarRef} onScroll={handleScroll}>
+      <div className="relative flex flex-col h-full flex-1 min-w-0 px-5">
+        <div className="sm:min-w-[390px] flex flex-row items-center justify-between pt-3 pb-1 gap-1 sticky top-0 z-10 bg-[var(--background-gray-main)] flex-shrink-0">
+          <div className="flex items-center flex-1">
+            <div className="relative flex items-center">
+              {!isLeftPanelShow && (
+                <div
+                  onClick={toggleLeftPanel}
+                  className="flex h-7 w-7 items-center justify-center cursor-pointer rounded-md hover:bg-[var(--fill-tsp-gray-main)]"
+                >
+                  <PanelLeft className="size-5 text-[var(--icon-secondary)]" />
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="max-w-full sm:max-w-[768px] sm:min-w-[390px] flex w-full flex-col gap-[4px] overflow-hidden">
+            <div className="text-[var(--text-primary)] text-lg font-medium w-full flex flex-row items-center justify-between flex-1 min-w-0 gap-2">
+              <div className="flex flex-row items-center gap-[6px] flex-1 min-w-0">
+                <span className="whitespace-nowrap text-ellipsis overflow-hidden">{title}</span>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button className="h-8 px-3 rounded-[100px] inline-flex items-center gap-1 cursor-pointer outline outline-1 outline-offset-[-1px] outline-[var(--border-btn-main)] hover:bg-[var(--fill-tsp-white-light)] me-1.5">
+                      <ShareIcon color="var(--icon-secondary)" />
+                      <span className="text-[var(--text-secondary)] text-sm font-medium">Share</span>
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent>
+                    <div
+                      className="w-[400px] flex flex-col rounded-2xl bg-[var(--background-menu-white)] shadow-[0px_8px_32px_0px_var(--shadow-S),0px_0px_0px_1px_var(--border-light)]"
+                      style={{ maxWidth: 'calc(-16px + 100vw)' }}
+                    >
+                      <div className="flex flex-col pt-[12px] px-[16px] pb-[16px]">
+                        <div
+                          onClick={() => handleShareModeChange('private')}
+                          className={cn(
+                            'flex items-center gap-[10px] px-[8px] -mx-[8px] py-[8px] rounded-[8px] cursor-pointer hover:bg-[var(--fill-tsp-white-main)]',
+                            sharingLoading && 'pointer-events-none opacity-50',
+                          )}
+                        >
+                          <div
+                            className={cn(
+                              'w-[32px] h-[32px] rounded-[8px] flex items-center justify-center',
+                              shareMode === 'private'
+                                ? 'bg-[var(--Button-primary-black)]'
+                                : 'bg-[var(--fill-tsp-white-dark)]',
+                            )}
+                          >
+                            <Lock
+                              size={16}
+                              stroke={
+                                shareMode === 'private'
+                                  ? 'var(--text-onblack)'
+                                  : 'var(--icon-primary)'
+                              }
+                              strokeWidth={2}
+                            />
+                          </div>
+                          <div className="flex flex-col flex-1 min-w-0">
+                            <div className="text-sm font-medium text-[var(--text-primary)]">
+                              Private Only
+                            </div>
+                            <div className="text-[13px] text-[var(--text-tertiary)]">
+                              Only visible to you
+                            </div>
+                          </div>
+                          <Check
+                            size={20}
+                            className={cn(
+                              shareMode === 'private' ? 'ml-auto' : 'ml-auto invisible',
+                            )}
+                            color={
+                              shareMode === 'private'
+                                ? 'var(--icon-primary)'
+                                : 'var(--icon-tertiary)'
+                            }
+                          />
+                        </div>
+                        <div
+                          onClick={() => handleShareModeChange('public')}
+                          className={cn(
+                            'flex items-center gap-[10px] px-[8px] -mx-[8px] py-[8px] rounded-[8px] cursor-pointer hover:bg-[var(--fill-tsp-white-main)]',
+                            sharingLoading && 'pointer-events-none opacity-50',
+                          )}
+                        >
+                          <div
+                            className={cn(
+                              'w-[32px] h-[32px] rounded-[8px] flex items-center justify-center',
+                              shareMode === 'public'
+                                ? 'bg-[var(--Button-primary-black)]'
+                                : 'bg-[var(--fill-tsp-white-dark)]',
+                            )}
+                          >
+                            <Globe
+                              size={16}
+                              stroke={
+                                shareMode === 'public'
+                                  ? 'var(--text-onblack)'
+                                  : 'var(--icon-primary)'
+                              }
+                              strokeWidth={2}
+                            />
+                          </div>
+                          <div className="flex flex-col flex-1 min-w-0">
+                            <div className="text-sm font-medium text-[var(--text-primary)]">
+                              Public Access
+                            </div>
+                            <div className="text-[13px] text-[var(--text-tertiary)]">
+                              Anyone with the link can view
+                            </div>
+                          </div>
+                          <Check
+                            size={20}
+                            className={cn(
+                              shareMode === 'public' ? 'ml-auto' : 'ml-auto invisible',
+                            )}
+                            color={
+                              shareMode === 'public'
+                                ? 'var(--icon-primary)'
+                                : 'var(--icon-tertiary)'
+                            }
+                          />
+                        </div>
+                        <div className="border-t border-[var(--border-main)] mt-[4px]" />
+                        {shareMode === 'private' ? (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleInstantShare()
+                            }}
+                            disabled={sharingLoading}
+                            className="inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors hover:opacity-90 bg-[var(--Button-primary-black)] text-[var(--text-onblack)] h-[36px] px-[12px] rounded-[10px] gap-[6px] text-sm w-full mt-[16px] disabled:opacity-50"
+                          >
+                            {sharingLoading ? (
+                              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            ) : (
+                              <LinkIcon size={16} stroke="currentColor" strokeWidth={2} />
+                            )}
+                            {sharingLoading ? 'Sharing...' : 'Share Instantly'}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleCopyLink()
+                            }}
+                            className={cn(
+                              'inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors h-[36px] px-[12px] rounded-[10px] gap-[6px] text-sm w-full mt-[16px]',
+                              linkCopied
+                                ? 'bg-[var(--Button-primary-white)] text-[var(--text-primary)] hover:opacity-70 border border-[var(--border-btn-main)]'
+                                : 'bg-[var(--Button-primary-black)] text-[var(--text-onblack)] hover:opacity-90',
+                            )}
+                          >
+                            {linkCopied ? (
+                              <Check size={16} color="var(--text-primary)" />
+                            ) : (
+                              <LinkIcon size={16} stroke="currentColor" strokeWidth={2} />
+                            )}
+                            {linkCopied ? 'Link Copied' : 'Copy Link'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+                <button
+                  onClick={() => showSessionFileList()}
+                  className="p-[5px] flex items-center justify-center hover:bg-[var(--fill-tsp-white-dark)] rounded-lg cursor-pointer"
+                >
+                  <FileSearch className="text-[var(--icon-secondary)]" size={18} />
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="flex-1" />
+        </div>
+
+        <div className="mx-auto w-full max-w-full sm:max-w-[768px] sm:min-w-[390px] flex flex-col flex-1">
+          {plan && plan.tasks?.length > 0 && (
+            <div className="sticky top-0 z-10 pt-2 pb-1 bg-[var(--background-gray-main)]">
+              <PlanPanel plan={plan} />
+            </div>
+          )}
+          <div className="flex flex-col w-full gap-[12px] pb-[80px] pt-[12px] flex-1 overflow-y-auto">
+            {renderedMessages}
+            {isLoading && <LoadingIndicator text="Thinking" />}
+          </div>
+
+          <div className="flex flex-col bg-[var(--background-gray-main)] sticky bottom-0">
+            {!follow && (
+              <button
+                onClick={handleFollow}
+                className="flex items-center justify-center w-9 h-9 rounded-full bg-[var(--background-white-main)] hover:bg-[var(--background-gray-main)] cursor-pointer border border-[var(--border-main)] shadow-[0px_5px_16px_0px_var(--shadow-S)] absolute -top-20 left-1/2 -translate-x-1/2"
+              >
+                <ArrowDown className="text-[var(--icon-primary)]" size={20} />
+              </button>
+            )}
+            <ChatBox
+              rows={1}
+              value={inputMessage}
+              onChange={setInputMessage}
+              isRunning={isLoading}
+              attachments={attachments}
+              onAttachmentsChange={setAttachments}
+              onSubmit={() => chat(inputMessage, attachments)}
+              onStop={handleStop}
+            />
+          </div>
+        </div>
+      </div>
+      <ToolPanel
+        ref={toolPanel}
+        sessionId={sessionId}
+        realTime={realTime}
+        isShare={false}
+        onJumpToRealTime={jumpToRealTime}
+      />
+    </SimpleBar>
+  )
+}
