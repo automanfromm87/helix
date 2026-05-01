@@ -27,8 +27,17 @@ export async function createSession(
   return response.data.data
 }
 
-export async function getSession(sessionId: string): Promise<GetSessionResponse> {
-  const response = await apiClient.get<ApiResponse<GetSessionResponse>>(`/sessions/${sessionId}`)
+export async function getSession(
+  sessionId: string,
+  options: { eventsLimit?: number; eventsBefore?: string } = {},
+): Promise<GetSessionResponse> {
+  const params: Record<string, string | number> = {}
+  if (options.eventsLimit !== undefined) params.events_limit = options.eventsLimit
+  if (options.eventsBefore !== undefined) params.events_before = options.eventsBefore
+  const response = await apiClient.get<ApiResponse<GetSessionResponse>>(
+    `/sessions/${sessionId}`,
+    Object.keys(params).length > 0 ? { params } : undefined,
+  )
   return response.data.data
 }
 

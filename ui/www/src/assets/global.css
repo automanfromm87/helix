@@ -25,6 +25,16 @@ html {
   user-select: none;
 }
 
+/* Chat message rows: skip layout/paint when off-screen.
+ * Free perf win on long sessions — the browser elides rendering work for
+ * any row not in (or near) the viewport, drastically cutting style-recalc
+ * and paint time. The intrinsic-size hint keeps the scrollbar geometry
+ * stable even when rows haven't been measured yet. */
+.chat-message-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 80px;
+}
+
 .ltr\:border-l {
   border-left-width: 1px;
 }

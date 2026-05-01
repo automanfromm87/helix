@@ -223,6 +223,44 @@ class SqlSessionRepository(SessionRepository):
                 return None
             return _row_to_domain(row, _events_from_rows(list(row.events)))
 
+    async def find_events(
+        self,
+        session_id: str,
+        before_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[AgentEvent]:
+        # Latest `limit` events strictly before the cursor (or the global
+        # latest when no cursor). The PK is BigInt autoincrement, but FE
+        # sees event.id as the queue-counter string in event_data — we
+        # resolve the cursor by matching that field. This costs one extra
+        # subquery per page; cheap given the limit on result size.
+        from sqlalchemy import and_, desc
+
+        async with self._session_factory() as db:
+            stmt = select(SessionEventRow).where(
+                SessionEventRow.session_id == session_id
+            )
+            if before_id:
+                cutoff = await db.scalar(
+                    select(SessionEventRow.id)
+                    .where(
+                        and_(
+                            SessionEventRow.session_id == session_id,
+                            SessionEventRow.event_data["id"].astext == before_id,
+                        )
+                    )
+                    .limit(1)
+                )
+                if cutoff is not None:
+                    stmt = stmt.where(SessionEventRow.id < cutoff)
+            stmt = stmt.order_by(desc(SessionEventRow.id)).limit(int(limit))
+            result = await db.execute(stmt)
+            rows = list(result.scalars().all())
+        # Caller wants ascending chronological order — DB returned newest-first
+        # so we can apply the limit cleanly; reverse for output.
+        rows.reverse()
+        return _events_from_rows(rows)
+
     async def update_title(self, session_id: str, title: str) -> None:
         await self._apply_update(session_id, title=title)
 

@@ -30,7 +30,13 @@ export default function FileToolView({ sessionId, toolContent, live }: ToolViewP
   useEffect(() => {
     void loadFileContent()
     if (!live || !filePath) return
-    const id = window.setInterval(() => void loadFileContent(), 5000)
+    // Skip polling while the tab is hidden — Chrome's "slow tab" detector
+    // flags background tabs that keep doing network/work, and there's no
+    // user-visible benefit to refreshing content nobody can see.
+    const id = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
+      void loadFileContent()
+    }, 5000)
     return () => window.clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, filePath, toolContent.timestamp])

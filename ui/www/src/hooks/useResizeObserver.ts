@@ -28,7 +28,12 @@ export function useResizeObserver<T extends HTMLElement>(
 
     const update = () => {
       const next = property === 'width' ? observed.offsetWidth : observed.offsetHeight
-      setSize(next)
+      // Bail on no-op updates. Without this, sub-pixel layout oscillation
+      // (e.g. a flex child whose width is computed from `parentSize / 2`
+      // and feeds back into the parent's flex sizing) drives ResizeObserver
+      // into a setSize → render → observe → setSize loop until React's
+      // "Maximum update depth exceeded" hard guard fires.
+      setSize((prev) => (prev === next ? prev : next))
       callback?.(next)
     }
 

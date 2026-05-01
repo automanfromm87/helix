@@ -11,6 +11,7 @@ import {
 import { useRelativeTime } from '@/hooks/useTime'
 import { HelixTextIcon } from '@/components/icons'
 import AttachmentsMessage from './AttachmentsMessage'
+import CollapsibleMarkdown from './CollapsibleMarkdown'
 import Markdown from './Markdown'
 import ToolUse from './ToolUse'
 import { cn } from '@/lib/utils'
@@ -150,7 +151,10 @@ export default function ChatMessage({
             </div>
           </div>
         )}
-        <Markdown
+        {/* Long assistant turns (e.g. the model dumping a 50KB README) get
+         * default-collapsed to a head preview to keep DOM weight bounded.
+         * Streaming partials stay below threshold during typical turns. */}
+        <CollapsibleMarkdown
           content={content.content}
           className="max-w-none p-0 m-0 prose prose-sm sm:prose-base dark:prose-invert [&_pre:not(.shiki)]:!bg-[var(--fill-tsp-white-light)] [&_pre:not(.shiki)]:text-[var(--text-primary)] text-base text-[var(--text-primary)]"
         />

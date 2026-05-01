@@ -26,6 +26,24 @@ class SessionRepository(Protocol):
     async def find_by_id_and_user_id(self, session_id: str, user_id: str) -> Optional[Session]:
         """Find a session by ID and user ID (for authorization)"""
         ...
+
+    async def find_events(
+        self,
+        session_id: str,
+        before_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[BaseEvent]:
+        """Cursor-paginated event fetch for a session.
+
+        Returns up to `limit` events whose primary key is strictly LESS than
+        `before_id` (or the latest `limit` events when None), ordered by
+        ascending id so the caller can append them in chronological order.
+
+        Used by the chat page to bound the initial network payload — long
+        sessions previously sent every event back at once (8 MB+ in observed
+        cases). Older events can be fetched on scroll-to-top with
+        `before_id` set to the earliest currently-loaded id."""
+        ...
     
     async def update_title(self, session_id: str, title: str) -> None:
         """Update the title of a session"""

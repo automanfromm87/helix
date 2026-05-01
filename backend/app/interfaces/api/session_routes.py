@@ -90,10 +90,31 @@ async def create_session(
 @router.get("/{session_id}", response_model=APIResponse[GetSessionResponse])
 async def get_session(
     session_id: str,
+    events_limit: Optional[int] = Query(
+        None,
+        ge=1,
+        le=2000,
+        description=(
+            "Cap on number of events returned (latest first). Used by the "
+            "chat page to keep the initial payload small on long sessions."
+        ),
+    ),
+    events_before: Optional[str] = Query(
+        None,
+        description=(
+            "Event id cursor — return events strictly older than this id. "
+            "Pair with `events_limit` for paginated history loading."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
     agent_service: AgentService = Depends(get_agent_service)
 ) -> APIResponse[GetSessionResponse]:
-    session = await agent_service.get_session(session_id, current_user.id)
+    session = await agent_service.get_session(
+        session_id,
+        current_user.id,
+        events_limit=events_limit,
+        events_before=events_before,
+    )
     if not session:
         raise NotFoundError("Session not found")
     return APIResponse.success(GetSessionResponse(

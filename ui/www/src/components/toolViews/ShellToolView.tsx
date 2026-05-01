@@ -36,11 +36,15 @@ export default function ShellToolView({ sessionId, toolContent, live }: ToolView
     }
   }
 
-  // Load + 5s autorefresh while live.
+  // Load + 5s autorefresh while live. Polling pauses when the tab is in
+  // the background so Chrome's "slow tab" battery detector doesn't flag us.
   useEffect(() => {
     void loadShellContent()
     if (!live || !shellSessionId) return
-    const id = window.setInterval(() => void loadShellContent(), 5000)
+    const id = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
+      void loadShellContent()
+    }, 5000)
     return () => window.clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, shellSessionId, toolContent.timestamp])

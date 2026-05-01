@@ -8,7 +8,7 @@ import {
   type AttachmentsContent,
   type Message,
   type MessageContent,
-  type StepContent,
+  type TaskContent,
   type ToolContent,
 } from '@/types/message'
 import {
@@ -16,7 +16,7 @@ import {
   type ErrorEventData,
   type MessageEventData,
   type PlanEventData,
-  type StepEventData,
+  type TaskEventData,
   type TitleEventData,
   type ToolEventData,
 } from '@/types/event'
@@ -90,8 +90,8 @@ export default function SharePage() {
           Object.assign(existing, toolContent)
           return next.slice()
         }
-        const lastStep = [...next].reverse().find((m) => m.type === 'step')?.content as
-          | StepContent
+        const lastStep = [...next].reverse().find((m) => m.type === 'task')?.content as
+          | TaskContent
           | undefined
         if (lastStep && lastStep.status === 'running') lastStep.tools.push(toolContent)
         else next.push({ type: 'tool', content: toolContent })
@@ -106,14 +106,14 @@ export default function SharePage() {
     [realTime],
   )
 
-  const handleStepEvent = useCallback((data: StepEventData) => {
+  const handleStepEvent = useCallback((data: TaskEventData) => {
     setMessages((prev) => {
       const next = [...prev]
-      const lastStep = [...next].reverse().find((m) => m.type === 'step')?.content as
-        | StepContent
+      const lastStep = [...next].reverse().find((m) => m.type === 'task')?.content as
+        | TaskContent
         | undefined
       if (data.status === 'running') {
-        next.push({ type: 'step', content: { ...data, tools: [] } as StepContent })
+        next.push({ type: 'task', content: { ...data, tools: [] } as TaskContent })
       } else if (data.status === 'completed' && lastStep) {
         lastStep.status = 'completed'
       } else if (data.status === 'failed') {
@@ -143,8 +143,8 @@ export default function SharePage() {
         case 'tool':
           handleToolEvent(event.data as ToolEventData)
           break
-        case 'step':
-          handleStepEvent(event.data as StepEventData)
+        case 'task':
+          handleStepEvent(event.data as TaskEventData)
           break
         case 'error':
           handleErrorEvent(event.data as ErrorEventData)

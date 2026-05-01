@@ -36,13 +36,37 @@ const ChatBoxFiles = forwardRef<ChatBoxFilesHandle, Props>(({ attachments, onCha
   const [canScrollRight, setCanScrollRight] = useState(false)
   const showFilePanel = useFilePanel((s) => s.showFilePanel)
 
+  // Track the IDs we last notified the parent about. Without this, the
+  // pair of effects below — `attachments` → `files`, and `files` →
+  // `onChange(...)` — forms a feedback loop: onChange calls
+  // `setAttachments` upstream with a fresh array reference (parent doesn't
+  // memoize), parent re-renders, the new `attachments` ref triggers
+  // `setFiles(attachments)`, which triggers the upward effect again. The
+  // payload values are identical each cycle but the references aren't, so
+  // React never bails out and we trip "Maximum update depth exceeded".
+  const lastNotifiedIds = useRef<string>('')
+
   useEffect(() => {
-    setFiles(attachments)
+    setFiles((prev) => {
+      // Bail when content is structurally the same — keeps `prev` reference
+      // stable so the downstream `onChange` effect doesn't fire spuriously.
+      if (
+        prev.length === attachments.length &&
+        prev.every((p, i) => p.file_id === attachments[i]?.file_id)
+      ) {
+        return prev
+      }
+      return attachments
+    })
   }, [attachments])
 
   // Notify parent when uploads complete (only success files are kept upstream).
   useEffect(() => {
-    onChange?.(files.filter((f) => f.status !== 'failed' && f.status !== 'uploading'))
+    const ready = files.filter((f) => f.status !== 'failed' && f.status !== 'uploading')
+    const ids = ready.map((f) => f.file_id).join('|')
+    if (ids === lastNotifiedIds.current) return
+    lastNotifiedIds.current = ids
+    onChange?.(ready)
   }, [files, onChange])
 
   const updateScrollButtons = () => {

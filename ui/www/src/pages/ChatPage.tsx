@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   ArrowDown,
   Check,
@@ -193,6 +194,30 @@ export default function ChatPage() {
       })
       return next
     })
+    // Mirror the per-task transition into the PlanPanel's snapshot. The
+    // backend only emits PlanEvent at plan-level transitions (EXECUTING
+    // start / COMPLETED / FAILED / replan), so without this the plan
+    // panel would show all tasks pending until the entire plan finished.
+    //
+    // Skip during replay: a session restore replays every event in order,
+    // which already includes the plan events that carry the canonical
+    // task statuses. Mirroring per-task during replay does N redundant
+    // setStates and stacks render pressure that has tripped React's
+    // "Maximum update depth" guard on long sessions.
+    if (replayingRef.current) return
+    setPlan((prev) => {
+      if (!prev || prev.plan_id !== data.plan_id) return prev
+      const idx = prev.tasks.findIndex((t) => t.task_id === data.task_id)
+      const merged: TaskEventData = {
+        ...(idx >= 0 ? prev.tasks[idx] : ({} as TaskEventData)),
+        ...data,
+      }
+      const tasks =
+        idx >= 0
+          ? prev.tasks.map((t, i) => (i === idx ? merged : t))
+          : [...prev.tasks, merged].sort((a, b) => a.position - b.position)
+      return { ...prev, tasks }
+    })
   }, [])
 
   const handleErrorEvent = useCallback((data: ErrorEventData) => {
@@ -355,7 +380,13 @@ export default function ChatPage() {
   const restoreSession = useCallback(async () => {
     if (!sessionId) return
     try {
-      const session = await agentApi.getSession(sessionId)
+      // Bound the initial replay to the most recent N events. Long-running
+      // sessions can accumulate thousands of events (8 MB+ payloads) which
+      // dominates first-paint time. The chat panel still renders correctly
+      // because virtualization + collapsible content keep visible work
+      // bounded, and 300 events is enough to show the user the recent
+      // context. Older history can be added via a future scroll-up loader.
+      const session = await agentApi.getSession(sessionId, { eventsLimit: 300 })
       setShareMode(session.is_shared ? 'public' : 'private')
       setRealTime(false)
       // Synchronous ref so the for-loop's done/wait events don't tear down
@@ -496,18 +527,34 @@ export default function ChatPage() {
     }
   }
 
-  const renderedMessages = useMemo(() => {
-    return messages.map((message, index) => (
-      <ChatMessage
-        key={index}
-        message={message}
-        hideHeader={isConsecutiveAssistant(messages, index)}
-        onToolClick={handleToolClick}
-        onEditUserMessage={handleEditUserMessage}
-      />
-    ))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, handleEditUserMessage])
+  // Virtualize the message list so only items near the viewport are
+  // mounted. Long sessions (3000+ events) previously rendered every
+  // ChatMessage subtree at once — measurable seconds of mount + recurring
+  // style-recalc on every state change. We hand the virtualizer
+  // SimpleBar's scroll element so the existing scrollbar UX keeps working.
+  const virtualParentRef = useRef<HTMLDivElement>(null)
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => simpleBarRef.current?.getScrollElement() ?? null,
+    estimateSize: () => 120,
+    // Account for sticky header / plan panel / inner padding above the
+    // virtualized list — items position relative to scrollMargin so the
+    // first item lines up correctly under the sticky region.
+    scrollMargin: virtualParentRef.current?.offsetTop ?? 0,
+    overscan: 8,
+    // Re-key when the underlying message identity changes (e.g. edit-and-
+    // regenerate truncates the array), so cached row measurements don't
+    // mis-align with the new content.
+    getItemKey: (index) => {
+      const m = messages[index]
+      const c = m?.content as { event_id?: string; tool_call_id?: string; task_id?: string }
+      return c?.event_id ?? c?.tool_call_id ?? c?.task_id ?? index
+    },
+  })
+
+  const virtualItems = virtualizer.getVirtualItems()
+  const totalHeight = virtualizer.getTotalSize()
+  const scrollMargin = virtualizer.options.scrollMargin ?? 0
 
   return (
     <SimpleBar ref={simpleBarRef} onScroll={handleScroll}>
@@ -694,9 +741,55 @@ export default function ChatPage() {
               <PlanPanel plan={plan} />
             </div>
           )}
-          <div className="flex flex-col w-full gap-[12px] pb-[80px] pt-[12px] flex-1 overflow-y-auto">
-            {renderedMessages}
-            {isLoading && <LoadingIndicator text="Thinking" />}
+          <div
+            ref={virtualParentRef}
+            className="w-full pt-[12px] pb-[80px] flex-1"
+            style={{ position: 'relative', minHeight: totalHeight }}
+          >
+            {virtualItems.map((virtualRow) => {
+              const message = messages[virtualRow.index]
+              if (!message) return null
+              return (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={virtualizer.measureElement}
+                  // The wrapper is absolutely positioned by the virtualizer.
+                  // `chat-message-row` keeps the off-screen content-visibility
+                  // optimization for double-defense — only on-screen virtual
+                  // items hit the DOM, and even those skip paint when the
+                  // user scrolls them out before unmount.
+                  className="chat-message-row"
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${virtualRow.start - scrollMargin}px)`,
+                    paddingBottom: 12,
+                  }}
+                >
+                  <ChatMessage
+                    message={message}
+                    hideHeader={isConsecutiveAssistant(messages, virtualRow.index)}
+                    onToolClick={handleToolClick}
+                    onEditUserMessage={handleEditUserMessage}
+                  />
+                </div>
+              )
+            })}
+            {isLoading && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: totalHeight,
+                  left: 0,
+                  width: '100%',
+                }}
+              >
+                <LoadingIndicator text="Thinking" />
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col bg-[var(--background-gray-main)] sticky bottom-0">

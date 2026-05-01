@@ -155,8 +155,19 @@ class AgentService:
             yield event
         logger.info(f"Chat with session {session_id} completed")
     
-    async def get_session(self, session_id: str, user_id: Optional[str] = None) -> Optional[Session]:
-        """Get a session by ID, ensuring it belongs to the user"""
+    async def get_session(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+        events_limit: Optional[int] = None,
+        events_before: Optional[str] = None,
+    ) -> Optional[Session]:
+        """Get a session by ID, ensuring it belongs to the user.
+
+        When `events_limit` is provided, returns only the latest N events
+        (or the N immediately before `events_before` if a cursor is given).
+        Used by the chat page to bound the initial network payload — long
+        sessions previously shipped every event back at once."""
         logger.info(f"Getting session {session_id} for user {user_id}")
         if not user_id:
             session = await self._session_repository.find_by_id(session_id)
@@ -164,6 +175,17 @@ class AgentService:
             session = await self._session_repository.find_by_id_and_user_id(session_id, user_id)
         if not session:
             logger.error(f"Session {session_id} not found for user {user_id}")
+            return None
+
+        if events_limit is not None:
+            # Replace the eagerly-loaded events with a paginated slice.
+            # Repo orders ascending; we keep that ordering for the FE so
+            # event replay walks chronologically without sorting upfront.
+            session.events = await self._session_repository.find_events(
+                session_id,
+                before_id=events_before,
+                limit=int(events_limit),
+            )
         return session
     
     async def get_all_sessions(self, user_id: str) -> List[SessionSummary]:
