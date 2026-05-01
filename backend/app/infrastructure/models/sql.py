@@ -211,6 +211,8 @@ class PlanRow(Base):
     language: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="planning")
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Number of replan cycles run on this plan; the flow caps it.
+    recovery_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

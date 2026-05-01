@@ -48,6 +48,7 @@ def _plan_row_to_domain(row: PlanRow) -> Plan:
         status=PlanStatus(row.status),
         error=row.error,
         tasks=[_task_row_to_domain(t) for t in row.tasks],
+        recovery_count=row.recovery_count or 0,
         created_at=row.created_at,
         updated_at=row.updated_at,
         completed_at=row.completed_at,
@@ -195,6 +196,15 @@ class SqlPlanRepository(PlanRepository):
             )
             await db.commit()
             return qres.rowcount or 0
+
+    async def increment_plan_recovery_count(self, plan_id: str) -> int:
+        async with self._session_factory() as db:
+            row = await db.get(PlanRow, plan_id)
+            if row is None:
+                raise NotFoundError(f"Plan {plan_id} not found")
+            row.recovery_count = (row.recovery_count or 0) + 1
+            await db.commit()
+            return row.recovery_count
 
     async def reset_running_tasks(self, plan_id: str) -> int:
         async with self._session_factory() as db:

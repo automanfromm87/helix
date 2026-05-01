@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     # timeout because nothing useful is happening yet — if the SDK can't
     # establish the stream in this window, retry rather than wait.
     llm_stream_first_byte_timeout: float = 30.0  # seconds
+    # Hard wall-clock cap on a single streaming LLM call. Distinct from the
+    # idle timeout: chunk-idle only fires when the stream produces no events
+    # for N seconds, but observed pathology — CLOSE_WAIT socket where the SDK
+    # consumes EOF as low-level events without yielding a StopAsyncIteration —
+    # keeps the idle clock from ever firing. This bound guarantees that no
+    # single call can wedge a session indefinitely. Set well above worst
+    # observed legitimate latency (long generation on a freshly-cached
+    # huge prompt) so it never fires on a healthy call.
+    llm_stream_total_timeout: float = 300.0  # seconds
 
     # Model configuration
     model_name: str = "claude-opus-4-7"
@@ -66,9 +75,6 @@ class Settings(BaseSettings):
     # is no longer active. Set to 0 to disable.
     sandbox_janitor_interval_seconds: int = 300
 
-    # Browser engine configuration
-    browser_engine: str = "browser_use"  # "playwright" or "browser_use"
-    
     # Search engine configuration
     search_provider: str | None = "bing_web"  # "baidu", "baidu_web", "google", "bing", "bing_web", "tavily"
     baidu_search_api_key: str | None = None

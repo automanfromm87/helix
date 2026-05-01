@@ -21,7 +21,11 @@ from app.domain.models.event import (
 from app.domain.models.message import Message
 from app.domain.models.plan import Plan, Task
 from app.domain.repositories.agent_repository import AgentRepository
-from app.domain.services.agents.base import BaseAgent, _make_submit_tool
+from app.domain.services.agents.base import (
+    BaseAgent,
+    ERROR_CODE_BUDGET_EXHAUSTED,
+    _make_submit_tool,
+)
 from app.domain.services.prompts.execution import (
     EXECUTION_PROMPT,
     EXECUTION_SYSTEM_PROMPT,
@@ -127,7 +131,10 @@ class ExecutionAgent(BaseAgent):
 
             if submitted is None:
                 logger.error("Task %s ended without submit_task_result", task.id)
-                yield ErrorEvent(error="Executor did not submit a task result")
+                yield ErrorEvent(
+                    error="Executor did not submit a task result",
+                    code=ERROR_CODE_BUDGET_EXHAUSTED,
+                )
                 return
 
             try:

@@ -82,6 +82,13 @@ _DEFAULT_CONTEXT_MANAGEMENT: Dict[str, Any] = {
 _PAUSE_TOOLS = {ASK_USER_TOOL}
 
 
+# Error code attached to ErrorEvents that signal the agent's framework budget
+# (walltime / iteration cap / silent text-only exit) rather than a real task
+# failure. The flow uses this to skip the retry+replan path — replanning
+# wouldn't help, the next task hits the same wall.
+ERROR_CODE_BUDGET_EXHAUSTED = "budget_exhausted"
+
+
 class _SubmitToolkit:
     """Toolkit-shim used as the `toolkit` field of synthesized submit tools.
 
@@ -206,6 +213,62 @@ class BaseAgent(ABC):
         assert self.memory is not None
         await self._repository.save_memory(self._agent_id, self.name, self.memory)
 
+    async def _close_assistant_turn(
+        self,
+        memory: Memory,
+        tool_uses: List["ToolUseBlock"],
+        existing: Dict[str, "ToolResultBlock"],
+        orphan_reason: str,
+    ) -> None:
+        """Persist a user turn that answers EVERY tool_use in the just-emitted
+        assistant turn — using `existing` results when present, synthesizing
+        an `is_error=True` tool_result for any uses left unanswered.
+
+        Anthropic strictly requires that every assistant `tool_use` have a
+        matching `tool_result` in the immediately-following user turn. Our
+        bail-out paths (LoopGuard trips mid-dispatch, validation failures
+        that exhaust the failure streak) used to return without persisting
+        the user turn, leaving an orphan tool_use that poisoned the entire
+        session — every subsequent API call hit a parse failure on the
+        Anthropic side and the SDK saw an empty stream. This helper makes
+        it impossible to leak orphans by forcing the caller to commit the
+        user turn before yielding ErrorEvent and returning."""
+        if not tool_uses:
+            return
+        completed: List[ToolResultBlock] = []
+        for use in tool_uses:
+            block = existing.get(use.id)
+            if block is None:
+                block = ToolResultBlock(
+                    tool_use_id=use.id,
+                    content=orphan_reason,
+                    is_error=True,
+                )
+            completed.append(block)
+        memory.add_message(ConvMessage(role="user", content=completed))
+        await self._persist()
+
+    async def memory_checkpoint(self) -> int:
+        """Snapshot point for `restore_memory`. Returns the current message
+        count — pass it back later to truncate to exactly this state."""
+        memory = await self._ensure_memory()
+        return len(memory.messages)
+
+    async def restore_memory(self, checkpoint: int) -> int:
+        """Truncate memory back to the snapshot point. Returns the number of
+        messages dropped (0 if already at or below the checkpoint).
+
+        Used by the flow when a task ends without a clean submit — the noisy
+        ReAct trail from the failed attempt would otherwise prime the next
+        task to repeat the same death loop."""
+        memory = await self._ensure_memory()
+        if checkpoint >= len(memory.messages):
+            return 0
+        dropped = len(memory.messages) - checkpoint
+        memory.messages = memory.messages[:checkpoint]
+        await self._persist()
+        return dropped
+
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
@@ -221,7 +284,15 @@ class BaseAgent(ABC):
         guard = LoopGuard()
         deadline = time.monotonic() + self.max_walltime_seconds
 
-        for _ in range(self.max_iterations):
+        # Endgame trigger: how close to budget exhaustion before we force the
+        # model to invoke its terminal submit-* tool. Without this, a stuck
+        # ReAct loop spins to the iteration cap and then exits silently —
+        # leaving the executor with no submitted result and the flow with no
+        # actionable error to react to.
+        endgame_iter_threshold = max(self.max_iterations - 2, 1)
+        endgame_walltime_threshold = self.max_walltime_seconds * 0.9
+
+        for iteration in range(self.max_iterations):
             if time.monotonic() > deadline:
                 logger.warning(
                     "Agent %s exceeded walltime budget of %.0fs",
@@ -231,33 +302,65 @@ class BaseAgent(ABC):
                     error=(
                         f"Task exceeded {self.max_walltime_seconds:.0f}s walltime — "
                         "aborting to avoid an unbounded run. Split the work into smaller steps."
-                    )
+                    ),
+                    code=ERROR_CODE_BUDGET_EXHAUSTED,
                 )
                 return
+            elapsed = self.max_walltime_seconds - (deadline - time.monotonic())
+            in_endgame = (
+                self._terminal_tool_names()
+                and self._override_tool_choice is None
+                and (
+                    iteration >= endgame_iter_threshold
+                    or elapsed >= endgame_walltime_threshold
+                )
+            )
+            forced_choice: Optional[Dict[str, Any]] = None
+            if in_endgame:
+                # Pick the first terminal tool — for the executor this is
+                # `submit_task_result`. Forcing tool_choice means the model
+                # can't emit free text on its way out; it MUST hand back a
+                # structured success/failure report.
+                terminal_name = next(iter(self._terminal_tool_names()))
+                forced_choice = {"type": "tool", "name": terminal_name}
+                logger.info(
+                    "Agent %s entering endgame at iter=%d elapsed=%.1fs — forcing %s",
+                    self.name, iteration, elapsed, terminal_name,
+                )
+
             message_id = uuid.uuid4().hex[:16]
             assistant: Optional[ConvMessage] = None
+            saved_choice = self._override_tool_choice
+            if forced_choice is not None:
+                self._override_tool_choice = forced_choice
             try:
-                async for ev in self._call_model_with_retries(message_id):
-                    if isinstance(ev, ConvMessage):
-                        assistant = ev
-                    else:
-                        yield ev
-            except ModelOutputTruncatedError as e:
-                logger.error("Model output truncated twice for agent %s", self.name)
-                yield ErrorEvent(error=str(e))
-                return
-            except ModelRefusalError as e:
-                yield ErrorEvent(
-                    error=f"The model declined to respond: {e}",
-                )
-                return
-            except LLMError as e:
-                yield ErrorEvent(error=e.user_message())
-                return
-            except Exception as e:
-                logger.exception("Model call failed in agent %s", self.name)
-                yield ErrorEvent(error=f"Model call failed: {e}")
-                return
+                try:
+                    async for ev in self._call_model_with_retries(message_id):
+                        if isinstance(ev, ConvMessage):
+                            assistant = ev
+                        else:
+                            yield ev
+                except ModelOutputTruncatedError as e:
+                    logger.error("Model output truncated twice for agent %s", self.name)
+                    yield ErrorEvent(error=str(e))
+                    return
+                except ModelRefusalError as e:
+                    yield ErrorEvent(
+                        error=f"The model declined to respond: {e}",
+                    )
+                    return
+                except LLMError as e:
+                    yield ErrorEvent(error=e.user_message())
+                    return
+                except Exception as e:
+                    logger.exception("Model call failed in agent %s", self.name)
+                    yield ErrorEvent(error=f"Model call failed: {e}")
+                    return
+            finally:
+                # Always restore the per-call tool_choice, even if we returned
+                # early via an exception path — otherwise the endgame override
+                # would leak into a future execute() invocation.
+                self._override_tool_choice = saved_choice
 
             if assistant is None:
                 yield ErrorEvent(error="Empty model response")
@@ -290,6 +393,10 @@ class BaseAgent(ABC):
 
                 stop = guard.record_call(use.name, use.input)
                 if stop:
+                    await self._close_assistant_turn(
+                        memory, tool_uses, phase_one_results,
+                        "Tool dispatch aborted by loop-guard before execution",
+                    )
                     yield ErrorEvent(error=stop)
                     return
 
@@ -341,6 +448,10 @@ class BaseAgent(ABC):
                     )
                     stop = guard.record_failure(validation_err)
                     if stop:
+                        await self._close_assistant_turn(
+                            memory, tool_uses, phase_one_results,
+                            "Tool dispatch aborted by loop-guard after validation failure",
+                        )
                         yield ErrorEvent(error=stop)
                         return
                     continue
@@ -417,6 +528,14 @@ class BaseAgent(ABC):
                 else:
                     stop = guard.record_failure(result.message or "tool failure")
                     if stop:
+                        # Existing results so far (phase_one + executed
+                        # uses up to this point) — close the rest with
+                        # synthetic is_error blocks so memory stays valid.
+                        existing_dict = {b.tool_use_id: b for b in tool_results}
+                        await self._close_assistant_turn(
+                            memory, tool_uses, existing_dict,
+                            "Tool dispatch aborted by loop-guard mid-execution",
+                        )
                         yield ErrorEvent(error=stop)
                         return
 
@@ -431,7 +550,10 @@ class BaseAgent(ABC):
             if terminal and any(use.name in terminal for use in tool_uses):
                 return
         else:
-            yield ErrorEvent(error="Maximum iteration count reached, failed to complete the task")
+            yield ErrorEvent(
+                error="Maximum iteration count reached, failed to complete the task",
+                code=ERROR_CODE_BUDGET_EXHAUSTED,
+            )
 
     # ------------------------------------------------------------------
     # Resumption
@@ -655,11 +777,33 @@ class BaseAgent(ABC):
     # Tool invocation
     # ------------------------------------------------------------------
 
+    # Hard wall-clock cap on a single tool.ainvoke() call. Any individual
+    # tool internally hanging (e.g. CDP socket dies, browser_use reconnect
+    # spinning, sandbox shell wedge) gets killed at this boundary instead
+    # of consuming the entire task walltime budget. Tuned higher than the
+    # typical longest legitimate operation (a slow shell_exec finishing) but
+    # well below task walltime so the model gets a fast actionable error.
+    tool_call_timeout_seconds: float = 120.0
+
     async def _invoke_tool_with_retries(self, tool: Tool, args: Dict[str, Any]) -> ToolResult:
         last_error = ""
         for attempt in range(self.max_retries + 1):
             try:
-                return await tool.ainvoke(args)
+                return await asyncio.wait_for(
+                    tool.ainvoke(args),
+                    timeout=self.tool_call_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                msg = (
+                    f"Tool '{tool.name}' did not complete within "
+                    f"{self.tool_call_timeout_seconds:.0f}s — aborting this call. "
+                    "If the underlying operation is genuinely long-running, "
+                    "use the background+wait pattern (e.g. shell_exec & + shell_wait)."
+                )
+                logger.warning("%s (args=%s)", msg, args)
+                # Return immediately — retrying a hang of the same shape will
+                # almost certainly hang the same way.
+                return ToolResult(success=False, message=msg)
             except ServiceUnavailableError as e:
                 # Backing service is plainly down — no point burning retries.
                 # LoopGuard upstream sees the same error twice in a row and

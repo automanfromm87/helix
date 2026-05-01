@@ -99,6 +99,10 @@ class Plan(BaseModel):
     status: PlanStatus = PlanStatus.PLANNING
     error: Optional[str] = None
     tasks: List[Task] = []
+    # How many times this plan has gone through the recovery (replan) loop.
+    # The flow caps this so a planner that keeps choosing replan can't
+    # produce an unbounded series of failed cycles.
+    recovery_count: int = 0
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: Optional[datetime] = None

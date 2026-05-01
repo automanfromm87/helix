@@ -168,6 +168,9 @@ class PlannerAgent(BaseAgent):
         failed_description: str,
         failed_error: str,
         remaining: List[str],
+        prior_failures: List[str],
+        cycle_index: int,
+        max_cycles: int,
     ) -> AsyncGenerator[BaseEvent, None]:
         prompt = RECOVERY_PROMPT.format(
             goal=goal or "(no goal recorded)",
@@ -176,6 +179,9 @@ class PlannerAgent(BaseAgent):
             failed_description=failed_description,
             failed_error=failed_error,
             remaining="\n".join(f"- {r}" for r in remaining) or "- (none)",
+            prior_failures="\n".join(f"- {p}" for p in prior_failures) or "- (none)",
+            cycle_index=cycle_index,
+            max_cycles=max_cycles,
         )
         async for event in self._submit_call(
             prompt=prompt,

@@ -60,6 +60,12 @@ class PlanRepository(Protocol):
         Returns the new tasks in position order."""
         ...
 
+    async def increment_plan_recovery_count(self, plan_id: str) -> int:
+        """Atomic +1 on the plan's recovery counter; returns the new value.
+        Used by the flow to cap how many recover-replan cycles one plan can
+        run before we force abandonment."""
+        ...
+
     async def reset_running_tasks(self, plan_id: str) -> int:
         """Flip every RUNNING task on the plan back to PENDING. Called by the
         startup reaper: a backend crash leaves the in-flight task stranded in

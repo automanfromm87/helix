@@ -198,63 +198,84 @@ async def complete_stream(
     started = time.monotonic()
     idle_timeout = settings.llm_stream_idle_timeout
     first_byte_timeout = settings.llm_stream_first_byte_timeout
+    total_timeout = settings.llm_stream_total_timeout
     # Don't repeatedly join the chunk list — quadratic on large outputs.
     # Consumers that need the prefix can compute it themselves; emitting the
     # incremental chunk is enough for streamed UI rendering.
     #
-    # Two timeouts cover the two stall modes Anthropic streams can hit:
+    # Three layers of protection — one for each observed failure mode:
     #   * `first_byte_timeout` — `__aenter__()` hung: server hasn't even
     #     accepted the request yet (proxy issue, queueing, big-cache key
     #     compute, etc.).
     #   * `idle_timeout` — stream open but server gone silent mid-response.
-    # `AsyncExitStack` ensures the stream is properly closed if either
-    # timeout fires, so we don't leak the underlying httpx connection.
+    #   * `total_timeout` — wall-clock cap on the whole call. Catches the
+    #     pathology where the underlying socket sits in CLOSE_WAIT, the SDK
+    #     keeps reading b"" without yielding `StopAsyncIteration`, and the
+    #     idle clock resets every iteration so it can never fire — a session
+    #     wedge that observed-in-the-wild needed 9+ minutes of silence to
+    #     diagnose. asyncio.timeout cancels the whole try block from the
+    #     outside; AsyncExitStack ensures the underlying stream is closed.
     try:
-        async with AsyncExitStack() as stack:
-            try:
-                stream = await asyncio.wait_for(
-                    stack.enter_async_context(stream_ctx(**params)),
-                    timeout=first_byte_timeout,
-                )
-            except asyncio.TimeoutError as exc:
-                raise LLMTransportError(
-                    f"first-byte idle for >{first_byte_timeout:.0f}s",
-                    cause=exc,
-                ).with_retry_after(2.0)
-
-            stream_iter = stream.__aiter__()
-            while True:
+        async with asyncio.timeout(total_timeout):
+            async with AsyncExitStack() as stack:
                 try:
-                    event = await asyncio.wait_for(
-                        stream_iter.__anext__(), timeout=idle_timeout,
+                    stream = await asyncio.wait_for(
+                        stack.enter_async_context(stream_ctx(**params)),
+                        timeout=first_byte_timeout,
                     )
-                except StopAsyncIteration:
-                    break
                 except asyncio.TimeoutError as exc:
                     raise LLMTransportError(
-                        f"streaming idle for >{idle_timeout:.0f}s",
+                        f"first-byte idle for >{first_byte_timeout:.0f}s",
                         cause=exc,
                     ).with_retry_after(2.0)
-                if getattr(event, "type", None) != "content_block_delta":
-                    continue
-                delta = getattr(event, "delta", None)
-                if delta is None or getattr(delta, "type", None) != "text_delta":
-                    continue
-                chunk = getattr(delta, "text", "") or ""
-                if chunk:
-                    yield {"type": "text_delta", "text": chunk}
-            try:
-                final_msg = await asyncio.wait_for(
-                    stream.get_final_message(), timeout=idle_timeout,
-                )
-            except asyncio.TimeoutError as exc:
-                raise LLMTransportError(
-                    f"final-message idle for >{idle_timeout:.0f}s",
-                    cause=exc,
-                ).with_retry_after(2.0)
-        payload = (
-            final_msg.model_dump() if hasattr(final_msg, "model_dump") else dict(final_msg)
+
+                stream_iter = stream.__aiter__()
+                while True:
+                    try:
+                        event = await asyncio.wait_for(
+                            stream_iter.__anext__(), timeout=idle_timeout,
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError as exc:
+                        raise LLMTransportError(
+                            f"streaming idle for >{idle_timeout:.0f}s",
+                            cause=exc,
+                        ).with_retry_after(2.0)
+                    if getattr(event, "type", None) != "content_block_delta":
+                        continue
+                    delta = getattr(event, "delta", None)
+                    if delta is None or getattr(delta, "type", None) != "text_delta":
+                        continue
+                    chunk = getattr(delta, "text", "") or ""
+                    if chunk:
+                        yield {"type": "text_delta", "text": chunk}
+                try:
+                    final_msg = await asyncio.wait_for(
+                        stream.get_final_message(), timeout=idle_timeout,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise LLMTransportError(
+                        f"final-message idle for >{idle_timeout:.0f}s",
+                        cause=exc,
+                    ).with_retry_after(2.0)
+            payload = (
+                final_msg.model_dump() if hasattr(final_msg, "model_dump") else dict(final_msg)
+            )
+    except asyncio.TimeoutError as exc:
+        # asyncio.timeout cancels the inner try block by raising TimeoutError
+        # at the outer scope. Convert to a typed transport error so the retry
+        # path treats it as transient (it might recover on a fresh socket).
+        elapsed = time.monotonic() - started
+        await _record_error(
+            params["model"], started,
+            RuntimeError(f"streaming wall-clock exceeded {total_timeout:.0f}s after {elapsed:.0f}s"),
         )
+        raise LLMTransportError(
+            f"streaming wall-clock exceeded {total_timeout:.0f}s — likely "
+            "stuck on CLOSE_WAIT socket; retrying with a fresh connection.",
+            cause=exc,
+        ).with_retry_after(1.0)
     except Exception as exc:
         latency_ms = int((time.monotonic() - started) * 1000)
         # SDK stream-parser asserts on rare unexpected payloads; log the

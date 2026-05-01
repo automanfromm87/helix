@@ -34,6 +34,7 @@ from app.domain.models.session import SessionStatus
 from app.domain.repositories.agent_repository import AgentRepository
 from app.domain.repositories.plan_repository import PlanRepository
 from app.domain.repositories.session_repository import SessionRepository
+from app.domain.services.agents.base import ERROR_CODE_BUDGET_EXHAUSTED
 from app.domain.services.agents.execution import ExecutionAgent
 from app.domain.services.agents.planner import PlannerAgent
 from app.domain.services.flows.base import BaseFlow
@@ -48,6 +49,12 @@ from app.domain.services.tools.skill import SkillToolkit, render_skill_index
 from app.domain.services.workspace_surveyor import WorkspaceSurveyor
 
 logger = logging.getLogger(__name__)
+
+
+# Hard cap on replan cycles per Plan. After this many recover-replan loops
+# we force abandon, regardless of what the planner wants — replans that
+# fail in series rarely produce a working alternative.
+MAX_RECOVERY_CYCLES: int = 2
 
 
 class FlowStatus(str, Enum):
@@ -325,13 +332,21 @@ class PlanActFlow(BaseFlow):
         task.status = TaskStatus.RUNNING
         yield TaskEvent(task=task, status=TaskStatus.RUNNING)
 
+        # Snapshot the executor's memory BEFORE this attempt. Failure path
+        # rolls back to here so the next task / retry doesn't inherit the
+        # noisy ReAct trail from a stuck attempt. Successful tasks keep
+        # their memory for downstream summarization.
+        memory_checkpoint = await self.executor.memory_checkpoint()
+
         had_error: Optional[str] = None
+        had_error_code: Optional[str] = None
         task_result: Optional[str] = None
         wait_hit = False
         try:
             async for event in self.executor.execute_task(self.plan, task, message):
                 if isinstance(event, ErrorEvent):
                     had_error = event.error
+                    had_error_code = getattr(event, "code", None)
                     # Don't yield the raw ErrorEvent — wrap into TaskEvent below.
                     continue
                 # WaitEvent: pause for user input. The task stays RUNNING.
@@ -354,6 +369,31 @@ class PlanActFlow(BaseFlow):
             return
 
         if had_error:
+            # Always roll the executor's memory back to before this attempt.
+            # The ReAct trail of a failed task is pure noise for whatever
+            # comes next (retry, replan, or summary) — leaving it in place
+            # is what produced the original death-loop behavior.
+            dropped = await self.executor.restore_memory(memory_checkpoint)
+            if dropped:
+                logger.info(
+                    "Rolled back %d executor memory message(s) after task %s failure",
+                    dropped, task.id,
+                )
+
+            # Budget-exhausted (walltime / iteration cap / silent exit) is a
+            # framework problem, not a task-feasibility problem. Replanning
+            # produces fresh tasks that hit the same wall. Skip the retry +
+            # recovery dance and go straight to abandon.
+            if had_error_code == ERROR_CODE_BUDGET_EXHAUSTED:
+                await self._plan_service.mark_task_failed_terminal(
+                    task.id, self.plan.id, task.position, had_error
+                )
+                failed = await self._plan_repository.find_task(task.id)
+                if failed:
+                    yield TaskEvent(task=failed, status=TaskStatus.FAILED)
+                self.status = FlowStatus.FAILED
+                return
+
             can_retry = await self._plan_service.record_task_failure(
                 task.id, self.plan.id, task.position, had_error
             )
@@ -409,12 +449,32 @@ class PlanActFlow(BaseFlow):
             self.status = FlowStatus.FAILED
             return
 
+        # Hard cap on replan cycles. Without this a planner that keeps
+        # picking "replan" can produce an unbounded series of failed
+        # task-batches (the original death-loop symptom — 11 → 19 tasks).
+        cycle_index = await self._plan_repository.increment_plan_recovery_count(plan.id)
+        if cycle_index > MAX_RECOVERY_CYCLES:
+            logger.warning(
+                "Plan %s exceeded %d recovery cycles — forcing abandon",
+                plan.id, MAX_RECOVERY_CYCLES,
+            )
+            failed = await self._plan_repository.find_task(failed_task.id)
+            if failed:
+                yield TaskEvent(task=failed, status=TaskStatus.FAILED)
+            self.status = FlowStatus.FAILED
+            return
+
         completed = [t.description for t in plan.tasks if t.status == TaskStatus.COMPLETED]
         remaining = [
             t.description
             for t in plan.tasks
             if t.position > failed_task.position
             and t.status in (TaskStatus.PENDING, TaskStatus.BLOCKED)
+        ]
+        prior_failures = [
+            f"{t.description} — error: {t.error or '(unknown)'}"
+            for t in plan.tasks
+            if t.status == TaskStatus.FAILED and t.id != failed_task.id
         ]
 
         decision = None
@@ -425,6 +485,9 @@ class PlanActFlow(BaseFlow):
             failed_description=failed_task.description,
             failed_error=error,
             remaining=remaining,
+            prior_failures=prior_failures,
+            cycle_index=cycle_index,
+            max_cycles=MAX_RECOVERY_CYCLES,
         ):
             extracted = getattr(event, "_recovery_decision", None)
             if extracted is not None:

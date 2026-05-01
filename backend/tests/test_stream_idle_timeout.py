@@ -78,6 +78,7 @@ async def test_streaming_idle_timeout_raises_transport_error() -> None:
         "llm_stream_idle_timeout": 0.3,
         "llm_stream_first_byte_timeout": 5.0,  # high → idle fires first
         "llm_request_timeout": 300.0,
+        "llm_stream_total_timeout": 300.0,
         "model_name": "claude-test",
         "max_tokens": 1024,
         "temperature": 0.7,
@@ -139,6 +140,7 @@ async def test_streaming_first_byte_timeout_raises_transport_error() -> None:
         "llm_stream_idle_timeout": 60.0,  # high → first_byte fires first
         "llm_stream_first_byte_timeout": 0.3,
         "llm_request_timeout": 300.0,
+        "llm_stream_total_timeout": 300.0,
         "model_name": "claude-test",
         "max_tokens": 1024,
         "temperature": 0.7,

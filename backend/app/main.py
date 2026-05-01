@@ -177,6 +177,11 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS title VARCHAR(512) NOT NULL DEFAULT ''"
         ))
         await conn.execute(text("ALTER TABLE tasks ALTER COLUMN description DROP NOT NULL"))
+        # Recovery cycle counter — caps replan-loop runaway when the planner
+        # keeps choosing replan after every failure.
+        await conn.execute(text(
+            "ALTER TABLE plans ADD COLUMN IF NOT EXISTS recovery_count INTEGER NOT NULL DEFAULT 0"
+        ))
     logger.info("Postgres schema ensured")
 
     # Crash recovery: a previous backend run was killed mid-task. For every

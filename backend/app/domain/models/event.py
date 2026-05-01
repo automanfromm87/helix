@@ -25,6 +25,11 @@ class BaseEvent(BaseModel):
 class ErrorEvent(BaseEvent):
     type: Literal["error"] = "error"
     error: str
+    # Optional machine-readable tag so the flow can route errors that need
+    # special handling (e.g. "budget_exhausted" should skip retry+replan and
+    # fail the plan immediately — replanning won't help when the framework
+    # itself ran out of room). Free-form string; absence = "generic error".
+    code: Optional[str] = None
 
 
 class PlanEvent(BaseEvent):

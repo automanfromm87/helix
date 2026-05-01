@@ -99,6 +99,20 @@ class PlanService:
         )
         return False
 
+    async def mark_task_failed_terminal(
+        self, task_id: str, plan_id: str, position: int, error: str
+    ) -> None:
+        """Fail the task, BLOCK the rest, FAIL the plan — without going through
+        retry / recovery. Used for framework-level failures (executor budget
+        exhausted, etc.) where another attempt provably won't help."""
+        await self._plans.update_task_status(
+            task_id, TaskStatus.FAILED, error=error
+        )
+        await self._plans.block_remaining_tasks(plan_id, position)
+        await self._plans.update_plan_status(
+            plan_id, PlanStatus.FAILED, error=f"Task failed: {error}"
+        )
+
     async def _verify_session(self, session_id: str, user_id: str) -> None:
         session = await self._sessions.find_by_id_and_user_id(session_id, user_id)
         if not session:
