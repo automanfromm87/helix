@@ -277,6 +277,17 @@ class Sandbox(Protocol):
     def vnc_url(self) -> str:
         """VNC URL"""
         ...
+
+    @property
+    def shell_stream_url(self) -> str:
+        """WebSocket URL for the interactive pty shell stream.
+
+        Distinct from `exec_command` (HTTP) — this endpoint serves the
+        chat-UI's xterm.js terminal: a real pty with full bidirectional
+        bytes. The base path is `ws://<sandbox-ip>:8080/api/v1/shell/stream`
+        with optional `?cols=&rows=&cwd=` query params.
+        """
+        ...
     
     @classmethod
     async def create(cls) -> 'Sandbox':

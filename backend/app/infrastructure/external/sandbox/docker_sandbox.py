@@ -97,6 +97,13 @@ class DockerSandbox(Sandbox):
     def vnc_url(self) -> str:
         return self._vnc_url
 
+    @property
+    def shell_stream_url(self) -> str:
+        # Same port as the rest of the sandbox HTTP API — FastAPI handles
+        # both HTTP and WS upgrades on 8080. Cols/rows/cwd are passed as
+        # query params from the proxy when known.
+        return f"ws://{self.ip}:8080/api/v1/shell/stream"
+
     @staticmethod
     def _get_container_ip(container) -> str:
         """Get container IP address from network settings

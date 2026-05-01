@@ -11,6 +11,10 @@ dependencies = [
     "pydantic-settings>=2.12.0",
     "python-multipart>=0.0.20",
     "uvicorn>=0.38.0",
+    # uvicorn can't upgrade HTTP→WebSocket without an underlying WS
+    # implementation. Required by /api/v1/shell/stream (xterm.js pty
+    # endpoint) — without it, WS routes silently 404.
+    "websockets>=12.0",
 ]
 
 [dependency-groups]

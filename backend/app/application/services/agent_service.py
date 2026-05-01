@@ -261,21 +261,53 @@ class AgentService:
     async def get_vnc_url(self, session_id: str) -> str:
         """Get VNC URL for a session, ensuring it belongs to the user"""
         logger.info(f"Getting VNC URL for session {session_id}")
-        
+
         session = await self._session_repository.find_by_id(session_id)
         if not session:
             logger.error(f"Session {session_id} not found")
             raise NotFoundError("Session not found")
-        
+
         if not session.sandbox_id:
             raise RuntimeError("Session has no sandbox environment")
-        
+
         # Get sandbox and return VNC URL
         sandbox = await self._sandbox_cls.get(session.sandbox_id)
         if not sandbox:
             raise RuntimeError("Sandbox environment not found")
-        
+
         return sandbox.vnc_url
+
+    async def get_shell_stream_url(
+        self,
+        session_id: str,
+        cols: int = 80,
+        rows: int = 24,
+        cwd: Optional[str] = None,
+    ) -> str:
+        """Return the sandbox-side WS URL for the interactive pty shell.
+
+        Used by the chat UI's xterm.js terminal. Auth is up to the caller —
+        the WS route does its own session-ownership check + signed URL
+        verification."""
+        logger.info(f"Getting shell stream URL for session {session_id}")
+        session = await self._session_repository.find_by_id(session_id)
+        if not session:
+            raise NotFoundError("Session not found")
+        if not session.sandbox_id:
+            raise RuntimeError("Session has no sandbox environment")
+        sandbox = await self._sandbox_cls.get(session.sandbox_id)
+        if not sandbox:
+            raise RuntimeError("Sandbox environment not found")
+        base = sandbox.shell_stream_url
+        params = []
+        if cols > 0:
+            params.append(f"cols={int(cols)}")
+        if rows > 0:
+            params.append(f"rows={int(rows)}")
+        if cwd:
+            from urllib.parse import quote
+            params.append(f"cwd={quote(cwd, safe='/')}")
+        return f"{base}?{'&'.join(params)}" if params else base
 
     async def file_view(self, session_id: str, file_path: str, user_id: str) -> FileViewResponse:
         """View file content, ensuring session belongs to the user"""

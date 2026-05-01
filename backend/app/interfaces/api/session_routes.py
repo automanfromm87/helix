@@ -385,6 +385,128 @@ async def get_session_files(
     return APIResponse.success(files)
 
 
+@router.websocket("/{session_id}/shell/stream")
+async def shell_stream_websocket(
+    websocket: WebSocket,
+    session_id: str,
+    cols: int = 80,
+    rows: int = 24,
+    cwd: Optional[str] = None,
+    signature: str = Depends(verify_signature_websocket),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> None:
+    """Interactive pty shell over WebSocket.
+
+    Authenticated by signed URL (same scheme as /vnc) — the FE first
+    POSTs to /shell/stream/signed-url, gets back a tokenised WS URL,
+    then opens the WS. We then proxy bidirectionally to the sandbox's
+    own /shell/stream WS endpoint.
+
+    Wire protocol:
+      client → server  binary    raw stdin (xterm.js keystrokes)
+      client → server  text      JSON control: {"type":"resize","cols":N,"rows":M}
+      server → client  binary    raw pty stdout/stderr
+    """
+    await websocket.accept()
+    logger.info(f"Accepted shell stream WS for session {session_id}")
+
+    try:
+        sandbox_ws_url = await agent_service.get_shell_stream_url(
+            session_id, cols=cols, rows=rows, cwd=cwd,
+        )
+    except NotFoundError as exc:
+        await websocket.close(code=1008, reason=str(exc))
+        return
+    except Exception as exc:
+        logger.error(f"shell-stream URL failed for {session_id}: {exc}")
+        await websocket.close(code=1011, reason="sandbox unavailable")
+        return
+
+    try:
+        async with websockets.connect(sandbox_ws_url) as sandbox_ws:
+            logger.info(f"Connected to sandbox shell stream {sandbox_ws_url}")
+
+            async def upstream() -> None:
+                # FE → sandbox: forward both binary (stdin) and text
+                # (JSON control) frames untouched.
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        mtype = msg.get("type")
+                        if mtype == "websocket.disconnect":
+                            return
+                        if "bytes" in msg and msg["bytes"] is not None:
+                            await sandbox_ws.send(msg["bytes"])
+                        elif "text" in msg and msg["text"] is not None:
+                            await sandbox_ws.send(msg["text"])
+                except WebSocketDisconnect:
+                    return
+                except Exception as e:
+                    logger.warning(f"shell upstream forward error: {e}")
+
+            async def downstream() -> None:
+                # Sandbox → FE: pty stdout always arrives as binary.
+                try:
+                    async for data in sandbox_ws:
+                        if isinstance(data, (bytes, bytearray)):
+                            await websocket.send_bytes(data)
+                        else:
+                            await websocket.send_text(data)
+                except websockets.exceptions.ConnectionClosed:
+                    return
+                except Exception as e:
+                    logger.warning(f"shell downstream forward error: {e}")
+
+            t_up = asyncio.create_task(upstream(), name="shell.upstream")
+            t_dn = asyncio.create_task(downstream(), name="shell.downstream")
+            done, pending = await asyncio.wait(
+                {t_up, t_dn}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+    except ConnectionError as exc:
+        logger.error(f"shell-stream sandbox connect failed: {exc}")
+        try:
+            await websocket.close(code=1011, reason="sandbox connection failed")
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.error(f"shell-stream proxy crashed: {exc}")
+        try:
+            await websocket.close(code=1011, reason="proxy error")
+        except Exception:
+            pass
+
+
+@router.post("/{session_id}/shell/stream/signed-url", response_model=APIResponse[SignedUrlResponse])
+async def create_shell_stream_signed_url(
+    session_id: str,
+    request_data: AccessTokenRequest,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+    token_service: TokenService = Depends(get_token_service),
+) -> APIResponse[SignedUrlResponse]:
+    """Mint a short-lived signed URL the FE can open the shell stream WS
+    against without normal auth headers (browsers can't set Authorization
+    on a WebSocket handshake)."""
+    expire_minutes = min(request_data.expire_minutes, 15)
+    session = await agent_service.get_session(session_id, current_user.id)
+    if not session:
+        raise NotFoundError("Session not found")
+    ws_base_url = f"/api/v1/sessions/{session_id}/shell/stream"
+    signed_url = token_service.create_signed_url(
+        base_url=ws_base_url,
+        expire_minutes=expire_minutes,
+    )
+    logger.info(
+        f"Created signed shell-stream URL for user {current_user.id}, session {session_id}",
+    )
+    return APIResponse.success(SignedUrlResponse(
+        signed_url=signed_url,
+        expires_in=expire_minutes * 60,
+    ))
+
+
 @router.post("/{session_id}/vnc/signed-url", response_model=APIResponse[SignedUrlResponse])
 async def create_vnc_signed_url(
     session_id: str,
