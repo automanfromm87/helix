@@ -51,5 +51,16 @@ export function isConsecutiveAssistant(messages: Message[], index: number): bool
   const isAst = (m: Message) =>
     m.type === 'assistant' ||
     (m.type === 'attachments' && (m.content as AttachmentsContent).role === 'assistant')
-  return isAst(messages[index]) && isAst(messages[index - 1])
+  if (!isAst(messages[index])) return false
+  // Skip past tool/task separators — they belong to the same Helix turn,
+  // so the assistant message after them shouldn't re-render the header.
+  // Without this, plan-act runs render duplicate "Helix" headers around
+  // every task block.
+  for (let i = index - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.type === 'tool' || m.type === 'task') continue
+    if (m.type === 'user') return false
+    return isAst(m)
+  }
+  return false
 }

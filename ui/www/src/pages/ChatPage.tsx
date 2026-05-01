@@ -72,6 +72,21 @@ export default function ChatPage() {
   const lastEventId = useRef<string | undefined>()
   const cancelCurrentChat = useRef<(() => void) | null>(null)
   const toolPanel = useRef<ToolPanelHandle>(null)
+  // Sync flag tracking whether a chat() invocation is already in flight
+  // for this session. Set the moment chat() starts, cleared when the SSE
+  // stream's onClose / onError fires. The ref is checked at the top of
+  // chat() so a second call (StrictMode remount, double-clicked Send,
+  // SSE reconnect race) is dropped before any HTTP POST is issued.
+  // Refs are stable across renders/remounts, so this works as a true
+  // single-token mutex without depending on async state propagation.
+  const chatInFlightRef = useRef(false)
+  // Tracks whether the initial nav-state message has already been
+  // consumed and kicked off chat(). React StrictMode double-mounts
+  // every component in dev, and `location.state` survives that double-
+  // mount unchanged — so without this guard, "build me a todo app"
+  // arriving via /chat/<id> navigation would fire chat() twice and
+  // create two parallel plans on the same session.
+  const navMessageConsumedRef = useRef(false)
   const simpleBarRef = useRef<SimpleBarHandle>(null)
   // True only while restoreSession is synchronously replaying historical
   // events. Kept distinct from `realTime` (which also flips when the user
@@ -280,6 +295,16 @@ export default function ChatPage() {
   const chat = useCallback(
     async (message = '', files: FileInfo[] = []) => {
       if (!sessionId) return
+      // Synchronous in-flight guard. The check + set must happen before
+      // any await — otherwise two near-simultaneous callers (StrictMode
+      // remount, double-clicked Send button) both pass the check and
+      // both fire the HTTP POST, creating two parallel Plans on the
+      // server. The flag is cleared in onClose / onError / catch.
+      if (chatInFlightRef.current) {
+        console.debug('[chat] dropped duplicate invocation while in flight')
+        return
+      }
+      chatInFlightRef.current = true
       cancelCurrentChat.current?.()
       cancelCurrentChat.current = null
 
@@ -315,7 +340,12 @@ export default function ChatPage() {
           sessionId,
           message,
           lastEventId.current,
-          files.map((f) => ({ file_id: f.file_id, filename: f.filename })),
+          files.map((f) => ({
+            file_id: f.file_id,
+            filename: f.filename,
+            content_type: f.content_type,
+            size: f.size,
+          })),
           {
             onOpen: () => {
               console.debug('[chat SSE] open')
@@ -332,11 +362,13 @@ export default function ChatPage() {
               console.debug('[chat SSE] close')
               setIsLoading(false)
               cancelCurrentChat.current = null
+              chatInFlightRef.current = false
             },
             onError: (e) => {
               console.error('[chat SSE] error', e)
               setIsLoading(false)
               cancelCurrentChat.current = null
+              chatInFlightRef.current = false
             },
           },
         )
@@ -345,6 +377,7 @@ export default function ChatPage() {
         console.error('Chat error:', e)
         setIsLoading(false)
         cancelCurrentChat.current = null
+        chatInFlightRef.current = false
       }
     },
     [sessionId, handleEvent],
@@ -415,6 +448,12 @@ export default function ChatPage() {
   useEffect(() => {
     cancelCurrentChat.current?.()
     cancelCurrentChat.current = null
+    // Clear in-flight + nav-consumption flags so the new session starts
+    // with a clean slate. Without this, navigating from one chat to
+    // another could leave the in-flight flag stuck if the prior SSE
+    // hadn't closed cleanly.
+    chatInFlightRef.current = false
+    navMessageConsumedRef.current = false
     setMessages([])
     setPlan(undefined)
     setTitle('New Chat')
@@ -430,10 +469,14 @@ export default function ChatPage() {
     hideFilePanel()
 
     const navState = (location.state as { message?: string; files?: FileInfo[] } | null) ?? null
-    if (navState?.message) {
+    if (navState?.message && !navMessageConsumedRef.current) {
+      // StrictMode-safe: claim the consumption synchronously so the
+      // remount can't re-fire. window.history.replaceState alone isn't
+      // enough — React's location.state closure survives the cleanup.
+      navMessageConsumedRef.current = true
       window.history.replaceState({}, document.title)
       void chat(navState.message, navState.files ?? [])
-    } else {
+    } else if (!navState?.message) {
       void restoreSession()
     }
 
@@ -445,9 +488,25 @@ export default function ChatPage() {
   }, [sessionId])
 
   // Auto-scroll on new message when in follow mode.
+  //
+  // Streaming chat fires `setMessages` many times per second, and a naive
+  // `scrollToBottom` per render produces jittery, visibly-rebounding scroll
+  // on long answers (the scrollbar tries to catch up with each chunk).
+  // Coalesce via rAF: schedule one pending scroll per frame at most, drop
+  // any that arrive while a frame is already queued.
+  const pendingScrollFrame = useRef<number | null>(null)
   useEffect(() => {
-    if (follow) {
-      requestAnimationFrame(() => simpleBarRef.current?.scrollToBottom())
+    if (!follow) return
+    if (pendingScrollFrame.current !== null) return
+    pendingScrollFrame.current = requestAnimationFrame(() => {
+      pendingScrollFrame.current = null
+      simpleBarRef.current?.scrollToBottom()
+    })
+    return () => {
+      if (pendingScrollFrame.current !== null) {
+        cancelAnimationFrame(pendingScrollFrame.current)
+        pendingScrollFrame.current = null
+      }
     }
   }, [messages, follow])
 
@@ -536,7 +595,11 @@ export default function ChatPage() {
   const virtualizer = useVirtualizer({
     count: messages.length,
     getScrollElement: () => simpleBarRef.current?.getScrollElement() ?? null,
-    estimateSize: () => 120,
+    // Bumped from 120 to 200 — typical assistant bubble in this app is
+    // 200-400px once rendered; 120 caused noticeable drift between
+    // estimated and measured sizes during streaming, which manifested as
+    // bottom-of-list shifting around as `measureElement` corrected.
+    estimateSize: () => 200,
     // Account for sticky header / plan panel / inner padding above the
     // virtualized list — items position relative to scrollMargin so the
     // first item lines up correctly under the sticky region.
@@ -548,7 +611,13 @@ export default function ChatPage() {
     getItemKey: (index) => {
       const m = messages[index]
       const c = m?.content as { event_id?: string; tool_call_id?: string; task_id?: string }
-      return c?.event_id ?? c?.tool_call_id ?? c?.task_id ?? index
+      // Prefix the natural id with the message type. A single user message
+      // with attachments produces TWO entries (a `user` message + a
+      // sibling `attachments` message) that share the same `event_id` —
+      // without the type prefix React/virtualizer sees a duplicate key
+      // and the tree blanks out.
+      const id = c?.event_id ?? c?.tool_call_id ?? c?.task_id ?? index
+      return `${m?.type ?? 'm'}:${id}`
     },
   })
 

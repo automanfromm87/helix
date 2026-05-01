@@ -156,6 +156,7 @@ export default function ChatMessage({
          * Streaming partials stay below threshold during typical turns. */}
         <CollapsibleMarkdown
           content={content.content}
+          partial={content.partial ?? false}
           className="max-w-none p-0 m-0 prose prose-sm sm:prose-base dark:prose-invert [&_pre:not(.shiki)]:!bg-[var(--fill-tsp-white-light)] [&_pre:not(.shiki)]:text-[var(--text-primary)] text-base text-[var(--text-primary)]"
         />
       </div>

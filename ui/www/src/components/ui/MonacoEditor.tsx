@@ -72,12 +72,33 @@ export default function MonacoEditor({
         readOnly,
         lineNumbers,
         wordWrap,
-        minimap: { enabled: minimap },
+        minimap: { enabled: minimap, maxColumn: 80 },
         scrollBeyondLastLine,
         automaticLayout,
         renderLineHighlight: 'none',
         contextmenu: false,
         scrollbar: { vertical: 'auto', horizontal: 'auto' },
+        // Code-editor niceties that make Monaco feel like an editor and
+        // not a textarea: typed monospace stack, indent guides drawn,
+        // bracket pairs colorized to make nested JSON / JSX scannable,
+        // sticky outline so long files stay navigable, and rounded
+        // selections so highlighted regions don't look 90s.
+        fontFamily:
+          'ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "JetBrains Mono", "Fira Code", "Courier New", monospace',
+        fontSize: 13,
+        fontLigatures: true,
+        bracketPairColorization: { enabled: true },
+        guides: { bracketPairs: 'active', indentation: true },
+        smoothScrolling: true,
+        cursorBlinking: 'smooth',
+        roundedSelection: true,
+        stickyScroll: { enabled: true, maxLineCount: 4 },
+        // Read-only viewers don't benefit from these; turning them off
+        // keeps the gutter narrow and the editor visually quieter.
+        folding: !readOnly,
+        glyphMargin: false,
+        lineDecorationsWidth: 8,
+        padding: { top: 8, bottom: 8 },
       }}
     />
   )

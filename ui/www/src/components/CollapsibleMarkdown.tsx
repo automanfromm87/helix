@@ -10,6 +10,8 @@ interface Props {
   threshold?: number
   /** Preview length when collapsed. */
   previewChars?: number
+  /** Streaming partial — forwarded to <Markdown /> for deferred rendering. */
+  partial?: boolean
 }
 
 const DEFAULT_THRESHOLD = 4000
@@ -38,12 +40,13 @@ export default function CollapsibleMarkdown({
   className,
   threshold = DEFAULT_THRESHOLD,
   previewChars = DEFAULT_PREVIEW,
+  partial,
 }: Props) {
   const [expanded, setExpanded] = useState(false)
   const isLong = typeof content === 'string' && content.length > threshold
 
   if (!isLong) {
-    return <Markdown content={content} className={className} />
+    return <Markdown content={content} className={className} partial={partial} />
   }
 
   // Try to truncate at a paragraph / line boundary for a cleaner preview;
@@ -54,7 +57,7 @@ export default function CollapsibleMarkdown({
 
   return (
     <div>
-      <Markdown content={visible} className={className} />
+      <Markdown content={visible} className={className} partial={partial} />
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}

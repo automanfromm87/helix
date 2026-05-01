@@ -25,14 +25,15 @@ html {
   user-select: none;
 }
 
-/* Chat message rows: skip layout/paint when off-screen.
- * Free perf win on long sessions — the browser elides rendering work for
- * any row not in (or near) the viewport, drastically cutting style-recalc
- * and paint time. The intrinsic-size hint keeps the scrollbar geometry
- * stable even when rows haven't been measured yet. */
+/* Intentionally empty — `content-visibility: auto` was here as a "double
+ * defense" alongside react-virtual, but it actively breaks the virtualizer:
+ * `measureElement` reads `contain-intrinsic-size` (80px) for off-screen rows
+ * instead of the real rendered height, so virtual offsets drift and rows
+ * overlap when they come back into view (visible as stacked Helix headers
+ * with overlapping text). Virtualization alone is the off-screen optimization;
+ * the CSS hint was redundant and harmful. */
 .chat-message-row {
-  content-visibility: auto;
-  contain-intrinsic-size: 0 80px;
+  /* keep the class so JSX still has a hook; no CSS needed */
 }
 
 .ltr\:border-l {

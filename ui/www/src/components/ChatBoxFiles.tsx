@@ -8,7 +8,7 @@ import {
 } from 'react'
 import { ChevronLeft, ChevronRight, Loader2, RefreshCcw, X } from 'lucide-react'
 
-import { uploadFile as apiUploadFile, type FileInfo } from '@/api/file'
+import { uploadFile as apiUploadFile, getFileDownloadUrl, type FileInfo } from '@/api/file'
 import { formatFileSize, getFileType, getFileTypeText } from '@/utils/fileType'
 import { useFilePanel } from '@/hooks/useFilePanel'
 
@@ -179,6 +179,20 @@ const ChatBoxFiles = forwardRef<ChatBoxFilesHandle, Props>(({ attachments, onCha
           >
             <div className="flex gap-3">
               {files.map((file) => {
+                const isImg =
+                  file.content_type?.startsWith('image/') ||
+                  /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.filename ?? '')
+                if (isImg) {
+                  return (
+                    <ImageStagingTile
+                      key={file.file_id}
+                      file={file}
+                      onClick={() => handleFileClick(file)}
+                      onRemove={() => removeFile(file.file_id)}
+                      onRetry={() => retryUpload(file)}
+                    />
+                  )
+                }
                 const { Icon } = getFileType(file.filename)
                 return (
                   <div
@@ -259,5 +273,100 @@ const ChatBoxFiles = forwardRef<ChatBoxFilesHandle, Props>(({ attachments, onCha
 })
 
 ChatBoxFiles.displayName = 'ChatBoxFiles'
+
+
+/**
+ * Compact thumbnail tile shown in the ChatBox composer for image files
+ * staged for upload. Uses an object URL while still uploading (so the
+ * preview is instant and works without a backend round-trip), then swaps
+ * to the signed-download URL once the upload succeeds.
+ */
+function ImageStagingTile({
+  file,
+  onClick,
+  onRemove,
+  onRetry,
+}: {
+  file: ExtendedFileInfo
+  onClick: () => void
+  onRemove: () => void
+  onRetry: () => void
+}) {
+  const [previewUrl, setPreviewUrl] = useState<string>('')
+
+  useEffect(() => {
+    let cancelled = false
+    let revokeMe: string | null = null
+    if (file.file) {
+      const url = URL.createObjectURL(file.file)
+      revokeMe = url
+      setPreviewUrl(url)
+    } else if (file.status !== 'uploading' && file.file_id && !file.file_id.startsWith('temp-')) {
+      void getFileDownloadUrl(file)
+        .then((u) => {
+          if (!cancelled) setPreviewUrl(u)
+        })
+        .catch(() => {})
+    }
+    return () => {
+      cancelled = true
+      if (revokeMe) URL.revokeObjectURL(revokeMe)
+    }
+  }, [file])
+
+  const failed = file.status === 'failed'
+  const uploading = file.status === 'uploading'
+
+  return (
+    <div
+      onClick={onClick}
+      className="relative w-[88px] h-[88px] rounded-[10px] overflow-hidden bg-[var(--fill-tsp-white-main)] group/attach cursor-pointer flex-shrink-0"
+    >
+      {previewUrl ? (
+        <img
+          src={previewUrl}
+          alt={file.filename}
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center text-[var(--icon-tertiary)]">
+          <Loader2 size={18} className="animate-spin" />
+        </div>
+      )}
+      {uploading && (
+        <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+          <Loader2 size={18} className="animate-spin text-white" />
+        </div>
+      )}
+      {failed && (
+        <div className="absolute inset-0 bg-[var(--function-error)]/40 flex items-center justify-center text-[10px] text-white text-center px-1">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onRetry()
+            }}
+            className="flex items-center gap-1"
+          >
+            <RefreshCcw size={12} />
+            <span>Retry</span>
+          </button>
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          onRemove()
+        }}
+        className="hidden group-hover/attach:flex absolute top-1 right-1 rounded-full p-[3px] bg-black/60 hover:bg-black/80"
+        title="Remove"
+      >
+        <X size={10} className="text-white" />
+      </button>
+    </div>
+  )
+}
+
 
 export default ChatBoxFiles

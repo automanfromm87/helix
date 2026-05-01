@@ -67,7 +67,7 @@ export async function regenerateFromMessage(
   sessionId: string,
   fromEventId: string,
   message: string,
-  attachments?: { file_id: string; filename: string }[],
+  attachments?: { file_id: string; filename: string; content_type?: string; size?: number }[],
 ): Promise<void> {
   await apiClient.post<ApiResponse<void>>(`/sessions/${sessionId}/regenerate`, {
     from_event_id: fromEventId,
@@ -137,7 +137,7 @@ export const chatWithSession = async (
   sessionId: string,
   message: string = '',
   eventId?: string,
-  attachments?: { file_id: string; filename: string }[],
+  attachments?: { file_id: string; filename: string; content_type?: string; size?: number }[],
   callbacks?: SSECallbacks<AgentSSEEvent['data']>,
 ): Promise<() => void> => {
   return createSSEConnection<AgentSSEEvent['data']>(
@@ -170,6 +170,29 @@ export async function viewFile(sessionId: string, file: string): Promise<FileVie
   const response = await apiClient.post<ApiResponse<FileViewResponse>>(
     `/sessions/${sessionId}/file`,
     { file },
+  )
+  return response.data.data
+}
+
+export interface FileListEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+}
+export interface FileListResponse {
+  path: string
+  entries: FileListEntry[]
+}
+
+export async function listDir(
+  sessionId: string,
+  path: string,
+  options: { showHidden?: boolean } = {},
+): Promise<FileListResponse> {
+  const response = await apiClient.post<ApiResponse<FileListResponse>>(
+    `/sessions/${sessionId}/file/list`,
+    { path, show_hidden: options.showHidden ?? false },
   )
   return response.data.data
 }
