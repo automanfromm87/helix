@@ -11,8 +11,7 @@ from app.core.config import get_settings
 from app.application.errors.exceptions import SandboxUnavailableError
 from app.domain.models.tool_result import ToolResult
 from app.domain.external.sandbox import Sandbox
-from app.infrastructure.external.browser.playwright_browser import PlaywrightBrowser
-from app.infrastructure.external.browser.browser_use_browser import BrowserUseBrowser
+from app.infrastructure.external.browser.cdp_browser import CDPBrowser
 from app.domain.external.browser import Browser
 
 logger = logging.getLogger(__name__)
@@ -544,20 +543,14 @@ class DockerSandbox(Sandbox):
             return False
     
     async def get_browser(self) -> Browser:
-        """Get browser instance
+        """Return a CDPBrowser bound to the sandbox's chrome.
 
-        Returns a browser implementation connected to the sandbox's Chrome via CDP.
-        The concrete implementation is selected by the BROWSER_ENGINE setting:
-          - "playwright"   → PlaywrightBrowser
-          - "browser_use"  → BrowserUseBrowser  (default)
-        """
-        settings = get_settings()
-        engine = (settings.browser_engine or "browser_use").lower().strip()
-        if engine == "browser_use":
-            logger.info("Using BrowserUseBrowser engine for CDP URL: %s", self.cdp_url)
-            return BrowserUseBrowser(self.cdp_url)
-        logger.info("Using PlaywrightBrowser engine for CDP URL: %s", self.cdp_url)
-        return PlaywrightBrowser(self.cdp_url)
+        Single engine — `CDPBrowser` (pure CDP via Playwright). The previous
+        browser_use / legacy-playwright engines were dropped after the
+        browser_use WebSocket-disconnect 30-min hang incident; CDPBrowser
+        wraps every CDP send in a hard timeout and avoids the silent
+        reconnect loops that caused that wedge."""
+        return CDPBrowser(self.cdp_url)
 
     @classmethod
     async def create(cls) -> Sandbox:
