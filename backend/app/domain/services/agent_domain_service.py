@@ -96,7 +96,7 @@ class AgentDomainService:
                 )
                 session.sandbox_id = None
         if not sandbox:
-            sandbox = await self._sandbox_cls.create()
+            sandbox = await self._sandbox_cls.create(session_id=session.id)
             session.sandbox_id = sandbox.id
         browser = await sandbox.get_browser()
         if not browser:

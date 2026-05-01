@@ -292,6 +292,13 @@ class Sandbox(Protocol):
         ...
 
     @property
+    def preview_url(self) -> Optional[str]:
+        """`http://localhost:<port>` for the sandbox's dev-server port,
+        if the implementation maps one. Returns None when no port is
+        bound. The FE iframes this directly — no proxy layer."""
+        ...
+
+    @property
     def shell_stream_url(self) -> str:
         """WebSocket URL for the interactive pty shell stream.
 
@@ -303,8 +310,14 @@ class Sandbox(Protocol):
         ...
     
     @classmethod
-    async def create(cls) -> 'Sandbox':
-        """Create a new sandbox instance"""
+    async def create(cls, session_id: Optional[str] = None) -> 'Sandbox':
+        """Create a new sandbox instance.
+
+        When `session_id` is supplied, the implementation may bind-mount
+        per-session host directories so project state survives container
+        replacement. Implementations that don't support persistence
+        ignore the argument.
+        """
         ...
     
     @classmethod

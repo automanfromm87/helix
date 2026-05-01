@@ -68,27 +68,46 @@ class _SafeSandboxClient:
             ) from exc
 
 
+# Container-side port the dev server is expected to bind to. Vite's
+# default; matches what the agent runs (`npm run dev -- --host 0.0.0.0`).
+# We map this to an ephemeral host port at container-create time.
+DEV_SERVER_CONTAINER_PORT: int = 5173
+
+
 class DockerSandbox(Sandbox):
-    def __init__(self, ip: str = None, container_name: str = None):
-        """Initialize Docker sandbox and API interaction client"""
+    def __init__(
+        self,
+        ip: str = None,
+        container_name: str = None,
+        preview_host_port: int | None = None,
+    ):
+        """Initialize Docker sandbox and API interaction client.
+
+        `preview_host_port` is the host TCP port docker mapped to the
+        sandbox's dev-server port (5173). When set, `preview_url` returns
+        `http://localhost:<port>` so the FE can iframe the running app
+        directly without going through VNC. None for legacy sandboxes
+        that didn't request the mapping.
+        """
         self.ip = ip
         self.base_url = f"http://{self.ip}:8080"
         self._vnc_url = f"ws://{self.ip}:5901"
         self._cdp_url = f"http://{self.ip}:9222"
         self._container_name = container_name
+        self._preview_host_port = preview_host_port
         self.client = _SafeSandboxClient(
             httpx.AsyncClient(timeout=600),
             sandbox_id=container_name or self.ip or "dev-sandbox",
         )
-    
+
     @property
     def id(self) -> str:
         """Sandbox ID"""
         if not self._container_name:
             return "dev-sandbox"
         return self._container_name
-    
-    
+
+
     @property
     def cdp_url(self) -> str:
         return self._cdp_url
@@ -98,11 +117,49 @@ class DockerSandbox(Sandbox):
         return self._vnc_url
 
     @property
+    def preview_url(self) -> Optional[str]:
+        """`http://localhost:<host_port>` for the sandbox's dev server.
+
+        Returns None until the container has a port mapping AND the user's
+        agent has actually started a server bound to 0.0.0.0:5173. Note
+        the port is reserved at container-create time but nothing is
+        listening until the agent runs `npm run dev -- --host 0.0.0.0`.
+        """
+        if self._preview_host_port is None:
+            return None
+        return f"http://localhost:{self._preview_host_port}"
+
+    @property
     def shell_stream_url(self) -> str:
         # Same port as the rest of the sandbox HTTP API — FastAPI handles
         # both HTTP and WS upgrades on 8080. Cols/rows/cwd are passed as
         # query params from the proxy when known.
         return f"ws://{self.ip}:8080/api/v1/shell/stream"
+
+    @staticmethod
+    def _extract_dev_server_port(container) -> Optional[int]:
+        """Read the host port docker assigned to the container's
+        DEV_SERVER_CONTAINER_PORT/tcp mapping. Returns None if the
+        mapping isn't present (e.g. sandbox started without `ports=`).
+
+        docker SDK structure: `container.ports` (or `attrs['NetworkSettings']
+        ['Ports']`) is `{ '5173/tcp': [{ 'HostIp': '0.0.0.0', 'HostPort': '54321' }, ...] }`.
+        We pick the first IPv4 binding. `None` for a mapping with the key
+        present but value-list empty (race window during start).
+        """
+        key = f"{DEV_SERVER_CONTAINER_PORT}/tcp"
+        ports = (
+            (container.attrs.get("NetworkSettings") or {}).get("Ports") or {}
+        )
+        bindings = ports.get(key) or []
+        for b in bindings:
+            host_port = b.get("HostPort")
+            if host_port:
+                try:
+                    return int(host_port)
+                except (TypeError, ValueError):
+                    continue
+        return None
 
     @staticmethod
     def _get_container_ip(container) -> str:
@@ -134,15 +191,16 @@ class DockerSandbox(Sandbox):
         return ip_address
 
     @staticmethod
-    def _create_task() -> 'DockerSandbox':
-        """Create a new Docker sandbox (static method)
-        
-        Args:
-            image: Docker image name
-            name_prefix: Container name prefix
-            
-        Returns:
-            DockerSandbox instance
+    def _create_task(session_id: Optional[str] = None) -> 'DockerSandbox':
+        """Create a new Docker sandbox (static method).
+
+        When `session_id` is supplied, the container's `/home/ubuntu/project`
+        is bind-mounted from `<sandbox_data_host_root>/<session_id>/project`
+        on the host. This means project files survive container removal
+        (TTL shutdown, manual stop, janitor reap) — the next sandbox for
+        the same session remounts the same host directory and picks up
+        where the previous one left off. Without `session_id` (legacy
+        callers / standalone use) the project dir is ephemeral.
         """
         # Use configured default values
         settings = get_settings()
@@ -150,12 +208,40 @@ class DockerSandbox(Sandbox):
         image = settings.sandbox_image
         name_prefix = settings.sandbox_name_prefix
         container_name = f"{name_prefix}-{str(uuid.uuid4())[:8]}"
-        
+
         try:
             # Create Docker client
             docker_client = docker.from_env()
 
-            # Prepare container configuration
+            # Prepare container configuration. Only forward env vars that
+            # are actually set — passing `None` becomes the literal string
+            # "None" inside the container, which then breaks the sandbox's
+            # pydantic settings parser (e.g. SERVICE_TIMEOUT_MINUTES).
+            sandbox_env: dict[str, str] = {}
+            if settings.sandbox_ttl_minutes is not None:
+                sandbox_env["SERVICE_TIMEOUT_MINUTES"] = str(settings.sandbox_ttl_minutes)
+            if settings.sandbox_chrome_args:
+                sandbox_env["CHROME_ARGS"] = settings.sandbox_chrome_args
+            if settings.sandbox_https_proxy:
+                sandbox_env["HTTPS_PROXY"] = settings.sandbox_https_proxy
+            if settings.sandbox_http_proxy:
+                sandbox_env["HTTP_PROXY"] = settings.sandbox_http_proxy
+            if settings.sandbox_no_proxy:
+                sandbox_env["NO_PROXY"] = settings.sandbox_no_proxy
+
+            # Per-session host bind mount. Path lives on the docker host
+            # (NOT inside this backend container) — the daemon resolves it.
+            volumes: dict[str, dict[str, str]] = {}
+            if session_id:
+                host_project = (
+                    f"{settings.sandbox_data_host_root.rstrip('/')}/{session_id}/project"
+                )
+                volumes[host_project] = {
+                    "bind": "/home/ubuntu/project",
+                    "mode": "rw",
+                }
+                sandbox_env["SANDBOX_OWN_PROJECT_DIR"] = "/home/ubuntu/project"
+
             container_config = {
                 "image": image,
                 "name": container_name,
@@ -166,16 +252,22 @@ class DockerSandbox(Sandbox):
                     # containers without false-positives on the host.
                     "helix.managed": "true",
                     "helix.role": "sandbox",
+                    # Track which session a sandbox belongs to so we can
+                    # find / replace it without consulting the DB.
+                    **({"helix.session": session_id} if session_id else {}),
                 },
-                "environment": {
-                    "SERVICE_TIMEOUT_MINUTES": settings.sandbox_ttl_minutes,
-                    "CHROME_ARGS": settings.sandbox_chrome_args,
-                    "HTTPS_PROXY": settings.sandbox_https_proxy,
-                    "HTTP_PROXY": settings.sandbox_http_proxy,
-                    "NO_PROXY": settings.sandbox_no_proxy
-                }
+                "environment": sandbox_env,
+                # Map the sandbox's dev-server port (Vite default 5173) to
+                # an ephemeral host port. Lets the FE iframe the running
+                # app via http://localhost:<port> without going through
+                # VNC. Nothing listens on 5173 until the agent starts the
+                # dev server, but the mapping is reserved up front so the
+                # iframe URL is stable for the sandbox's whole life.
+                "ports": {f"{DEV_SERVER_CONTAINER_PORT}/tcp": None},
             }
-            
+            if volumes:
+                container_config["volumes"] = volumes
+
             # Add network to container config if configured
             if settings.sandbox_network:
                 container_config["network"] = settings.sandbox_network
@@ -186,11 +278,13 @@ class DockerSandbox(Sandbox):
             # Get container IP address
             container.reload()  # Refresh container info
             ip_address = DockerSandbox._get_container_ip(container)
-            
+            preview_port = DockerSandbox._extract_dev_server_port(container)
+
             # Create and return DockerSandbox instance
             return DockerSandbox(
                 ip=ip_address,
-                container_name=container_name
+                container_name=container_name,
+                preview_host_port=preview_port,
             )
             
         except Exception as e:
@@ -220,17 +314,28 @@ class DockerSandbox(Sandbox):
                     await asyncio.sleep(retry_interval)
                     continue
                 
-                # Check if all services are RUNNING
+                # Check if all services are RUNNING. One-shot bootstrap
+                # programs (e.g. `prep_volumes` that chowns the bind-mount
+                # target then exits) finish in EXITED state with exit code 0
+                # — that's their healthy terminal state, not an error.
+                # Without this carve-out, ensure_sandbox would wait until
+                # the 60-second cap then surface a misleading "failed to
+                # start" log even though the long-running services are up.
                 all_running = True
                 non_running_services = []
-                
+
                 for service in services:
                     service_name = service.get("name", "unknown")
                     state_name = service.get("statename", "")
-                    
-                    if state_name != "RUNNING":
-                        all_running = False
-                        non_running_services.append(f"{service_name}({state_name})")
+                    exit_status = service.get("exitstatus", 0)
+
+                    if state_name == "RUNNING":
+                        continue
+                    if state_name == "EXITED" and exit_status == 0:
+                        # One-shot program that completed successfully.
+                        continue
+                    all_running = False
+                    non_running_services.append(f"{service_name}({state_name})")
                 
                 if all_running:
                     logger.info(f"All {len(services)} services are RUNNING - sandbox is ready")
@@ -558,11 +663,14 @@ class DockerSandbox(Sandbox):
         return CDPBrowser(self.cdp_url)
 
     @classmethod
-    async def create(cls) -> Sandbox:
-        """Create a new sandbox instance
-        
-        Returns:
-            New sandbox instance
+    async def create(cls, session_id: Optional[str] = None) -> Sandbox:
+        """Create a new sandbox instance.
+
+        When `session_id` is provided, the new container's project dir is
+        bind-mounted from a stable host path keyed by that session — so
+        project state persists across container lifecycles (this is the
+        whole point of `sandbox_data_host_root`). Falls back to ephemeral
+        when omitted (legacy callers).
         """
         settings = get_settings()
 
@@ -570,8 +678,8 @@ class DockerSandbox(Sandbox):
             # Chrome CDP needs IP address
             ip = await cls._resolve_hostname_to_ip(settings.sandbox_address)
             return DockerSandbox(ip=ip)
-    
-        return await asyncio.to_thread(DockerSandbox._create_task)
+
+        return await asyncio.to_thread(DockerSandbox._create_task, session_id)
     
     @staticmethod
     def reap_orphans(active_container_names: set[str]) -> int:
@@ -636,5 +744,10 @@ class DockerSandbox(Sandbox):
             ) from exc
 
         ip_address = cls._get_container_ip(container)
+        preview_port = cls._extract_dev_server_port(container)
         logger.info(f"IP address: {ip_address}")
-        return DockerSandbox(ip=ip_address, container_name=id)
+        return DockerSandbox(
+            ip=ip_address,
+            container_name=id,
+            preview_host_port=preview_port,
+        )

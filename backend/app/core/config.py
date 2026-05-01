@@ -65,7 +65,23 @@ class Settings(BaseSettings):
     sandbox_address: str | None = None
     sandbox_image: str | None = None
     sandbox_name_prefix: str | None = None
-    sandbox_ttl_minutes: int | None = 30
+    # `None` = sandbox never self-shuts-down. Default for local dev: a
+    # sandbox is just a docker container, there's no multi-tenant
+    # eviction pressure to satisfy. Cloud / shared deployments override
+    # this via env to e.g. 30 to keep idle sandboxes from accumulating.
+    sandbox_ttl_minutes: int | None = None
+    # Host filesystem path (NOT a backend-container path) under which
+    # per-session project directories live. Each session gets its own
+    # `<root>/<session_id>/project/` bind-mounted into the sandbox at
+    # `/home/ubuntu/project`. The host directory survives sandbox
+    # container removal — replacing the auto-shutdown-then-lose-data
+    # cycle from the previous TTL design.
+    #
+    # Resolution model: this is what the docker daemon sees. It may not
+    # exist inside the backend container's mount namespace; that's fine,
+    # the daemon (running on the host) creates and accesses the path.
+    # Override with `SANDBOX_DATA_HOST_ROOT` env in production.
+    sandbox_data_host_root: str = "/tmp/helix-sandboxes"
     sandbox_network: str | None = None  # Docker network bridge name
     sandbox_chrome_args: str | None = ""
     sandbox_https_proxy: str | None = None

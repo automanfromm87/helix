@@ -532,6 +532,27 @@ async def create_shell_stream_signed_url(
     ))
 
 
+@router.get("/{session_id}/preview", response_model=APIResponse[dict])
+async def get_session_preview_url(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> APIResponse[dict]:
+    """Return the host-side `http://localhost:<port>` URL for the
+    session's dev-server preview. The FE iframes this directly.
+
+    Returns `{"url": null}` when no port is mapped — the FE can fall
+    back to a placeholder until the sandbox is rebuilt with the new
+    port-mapping config.
+    """
+    # Ownership check happens through the agent_service path.
+    session = await agent_service.get_session(session_id, current_user.id)
+    if not session:
+        raise NotFoundError("Session not found")
+    url = await agent_service.get_preview_url(session_id)
+    return APIResponse.success({"url": url})
+
+
 @router.post("/{session_id}/vnc/signed-url", response_model=APIResponse[SignedUrlResponse])
 async def create_vnc_signed_url(
     session_id: str,

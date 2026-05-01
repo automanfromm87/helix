@@ -1,7 +1,7 @@
 from typing import AsyncGenerator, Optional, List
 import logging
 from datetime import datetime
-from app.application.errors.exceptions import NotFoundError
+from app.application.errors.exceptions import NotFoundError, SandboxUnavailableError
 from app.domain.models.session import Session, SessionSummary
 from app.domain.repositories.session_repository import SessionRepository
 
@@ -236,6 +236,36 @@ class AgentService:
         await self._agent_domain_service.shutdown()
         logger.info("All agents closed successfully")
 
+    async def _resolve_or_recreate_sandbox(self, session: Session) -> Sandbox:
+        """Return a live sandbox for `session`, transparently recreating
+        the container if the previously-bound one is gone.
+
+        Background: in local dev a sandbox is just a docker container with
+        no real eviction pressure (`sandbox_ttl_minutes = None` in the
+        default config), but historic sessions may still reference an
+        already-removed container from before that change. Rather than
+        force the user to send a chat message just to wake the panel,
+        spin up a fresh sandbox here, rebind it on the session row, and
+        return it. Same code path as `agent_domain_service._create_task`,
+        consolidated so the file/shell/vnc endpoints don't fail with 503
+        on every navigation.
+        """
+        if session.sandbox_id:
+            try:
+                return await self._sandbox_cls.get(session.sandbox_id)
+            except SandboxUnavailableError:
+                logger.info(
+                    "Session %s sandbox %s gone; spawning replacement",
+                    session.id, session.sandbox_id,
+                )
+        sandbox = await self._sandbox_cls.create(session_id=session.id)
+        session.sandbox_id = sandbox.id
+        # `save` is the canonical session-state write — the SessionRepository
+        # has no narrower update_sandbox_id helper. Same path the chat flow
+        # takes when it rebinds.
+        await self._session_repository.save(session)
+        return sandbox
+
     async def shell_view(self, session_id: str, shell_session_id: str, user_id: str) -> ShellViewResponse:
         """View shell session output, ensuring session belongs to the user"""
         logger.info(f"Getting shell view for session {session_id} for user {user_id}")
@@ -258,8 +288,30 @@ class AgentService:
         else:
             raise RuntimeError(f"Failed to get shell output: {result.message}")
 
+    async def get_preview_url(self, session_id: str) -> Optional[str]:
+        """Return the `http://localhost:<port>` preview URL for the
+        session's dev server, or None if no port is mapped (legacy
+        sandbox without ports= or a non-DockerSandbox impl).
+
+        Auto-recreates the sandbox if the bound one is gone — same
+        contract as `get_vnc_url` so the FE preview iframe survives
+        restart-then-reopen flows.
+        """
+        logger.info(f"Getting preview URL for session {session_id}")
+        session = await self._session_repository.find_by_id(session_id)
+        if not session:
+            raise NotFoundError("Session not found")
+        sandbox = await self._resolve_or_recreate_sandbox(session)
+        return getattr(sandbox, "preview_url", None)
+
     async def get_vnc_url(self, session_id: str) -> str:
-        """Get VNC URL for a session, ensuring it belongs to the user"""
+        """Get VNC URL for a session, ensuring it belongs to the user.
+
+        Auto-recreates the sandbox if the previously-bound container is
+        gone — the user reopened an old session whose sandbox died and
+        we'd rather just give them a working VNC than make them send a
+        chat message just to wake the panel.
+        """
         logger.info(f"Getting VNC URL for session {session_id}")
 
         session = await self._session_repository.find_by_id(session_id)
@@ -267,14 +319,7 @@ class AgentService:
             logger.error(f"Session {session_id} not found")
             raise NotFoundError("Session not found")
 
-        if not session.sandbox_id:
-            raise RuntimeError("Session has no sandbox environment")
-
-        # Get sandbox and return VNC URL
-        sandbox = await self._sandbox_cls.get(session.sandbox_id)
-        if not sandbox:
-            raise RuntimeError("Sandbox environment not found")
-
+        sandbox = await self._resolve_or_recreate_sandbox(session)
         return sandbox.vnc_url
 
     async def get_shell_stream_url(
@@ -293,11 +338,7 @@ class AgentService:
         session = await self._session_repository.find_by_id(session_id)
         if not session:
             raise NotFoundError("Session not found")
-        if not session.sandbox_id:
-            raise RuntimeError("Session has no sandbox environment")
-        sandbox = await self._sandbox_cls.get(session.sandbox_id)
-        if not sandbox:
-            raise RuntimeError("Sandbox environment not found")
+        sandbox = await self._resolve_or_recreate_sandbox(session)
         base = sandbox.shell_stream_url
         params = []
         if cols > 0:
@@ -316,15 +357,8 @@ class AgentService:
         if not session:
             logger.error(f"Session {session_id} not found for user {user_id}")
             raise NotFoundError("Session not found")
-        
-        if not session.sandbox_id:
-            raise RuntimeError("Session has no sandbox environment")
-        
-        # Get sandbox and file content
-        sandbox = await self._sandbox_cls.get(session.sandbox_id)
-        if not sandbox:
-            raise RuntimeError("Sandbox environment not found")
-        
+
+        sandbox = await self._resolve_or_recreate_sandbox(session)
         result = await sandbox.file_read(file_path)
         if result.success:
             return FileViewResponse(**result.data)
@@ -346,11 +380,7 @@ class AgentService:
         session = await self._session_repository.find_by_id_and_user_id(session_id, user_id)
         if not session:
             raise NotFoundError("Session not found")
-        if not session.sandbox_id:
-            raise RuntimeError("Session has no sandbox environment")
-        sandbox = await self._sandbox_cls.get(session.sandbox_id)
-        if not sandbox:
-            raise RuntimeError("Sandbox environment not found")
+        sandbox = await self._resolve_or_recreate_sandbox(session)
         result = await sandbox.file_list(dir_path, show_hidden=show_hidden)
         if result.success:
             return result.data
