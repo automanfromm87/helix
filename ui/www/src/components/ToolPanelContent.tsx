@@ -25,7 +25,10 @@ interface Props {
   onJumpToRealTime: () => void
 }
 
-const VIEW_ORDER: ReadonlyArray<string> = ['browser', 'file', 'shell', 'search', 'mcp']
+// Preview goes first — it's the dropdown default for any session that
+// has a dev server. Browser (VNC) follows for the agent's headless
+// chrome view. The rest are the agent's working tools.
+const VIEW_ORDER: ReadonlyArray<string> = ['preview', 'browser', 'file', 'shell', 'search', 'mcp']
 
 
 /**
@@ -83,13 +86,13 @@ export default function ToolPanelContent({
 
   /** Dropdown options in stable, human-friendly order.
    *
-   * Browser is included even when the agent hasn't called a browser tool
-   * yet — users want to peek at the sandbox preview proactively. The
-   * other categories (file/shell/search/mcp) only show after the agent
-   * surfaces them, since opening them empty isn't useful.
+   * `preview` and `browser` are always available — the user wants to
+   * peek at the running app / sandbox VNC even before the agent surfaces
+   * any tool of those categories. The rest (file/shell/search/mcp) only
+   * appear after the agent actually calls them.
    */
   const dropdownOptions = VIEW_ORDER.filter(
-    (k) => k in availableViews || k === 'browser',
+    (k) => k in availableViews || k === 'browser' || k === 'preview',
   )
 
   const [open, setOpen] = useState(false)

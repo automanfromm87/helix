@@ -62,6 +62,15 @@ export default function ChatPage() {
   const [follow, setFollow] = useState(true)
   const [title, setTitle] = useState('New Chat')
   const [plan, setPlan] = useState<PlanEventData | undefined>(undefined)
+  // History of all plans on this session, newest first. PlanPanel uses
+  // this to let the user step back through prior plans (each user turn
+  // typically creates a new Plan row — the current plan is just the
+  // newest entry, but earlier turns' plans are valuable context.)
+  const [planHistory, setPlanHistory] = useState<PlanEventData[]>([])
+  // Index into planHistory the user is currently viewing. 0 = newest
+  // (i.e. the live `plan`). When non-zero, PlanPanel shows the historical
+  // snapshot and we DON'T overlay live SSE updates onto it.
+  const [viewedPlanIndex, setViewedPlanIndex] = useState(0)
   const [attachments, setAttachments] = useState<FileInfo[]>([])
   const [shareMode, setShareMode] = useState<'private' | 'public'>('private')
   const [linkCopied, setLinkCopied] = useState(false)
@@ -269,9 +278,27 @@ export default function ChatPage() {
         case 'title':
           setTitle((event.data as TitleEventData).title)
           break
-        case 'plan':
-          setPlan(event.data as PlanEventData)
+        case 'plan': {
+          const planData = event.data as PlanEventData
+          setPlan(planData)
+          // Maintain the history list: replace if same plan_id (live
+          // updates to the active plan), prepend if new (a follow-up
+          // turn just produced a fresh plan).
+          setPlanHistory((prev) => {
+            const idx = prev.findIndex((p) => p.plan_id === planData.plan_id)
+            if (idx >= 0) {
+              const next = [...prev]
+              next[idx] = planData
+              return next
+            }
+            return [planData, ...prev]
+          })
+          // Snap viewer back to newest whenever a fresh plan arrives so
+          // the user sees the new live plan instead of being stuck on
+          // an older snapshot from the previous turn.
+          setViewedPlanIndex(0)
           break
+        }
         case 'done':
         case 'wait':
           // Explicit terminal events — sse-starlette keeps the SSE open with
@@ -422,6 +449,38 @@ export default function ChatPage() {
       const session = await agentApi.getSession(sessionId, { eventsLimit: 300 })
       setShareMode(session.is_shared ? 'public' : 'private')
       setRealTime(false)
+      // Fetch the full plan history (newest first) in parallel with the
+      // event replay. Without this, older plans don't surface because
+      // the bounded event window may not include their PlanEvent.
+      void agentApi.listSessionPlans(sessionId).then((plans) => {
+        if (plans.length === 0) return
+        // PlanItem from the API maps cleanly onto our PlanEventData
+        // shape (same keys; statuses share the literal union).
+        const mapped = plans.map((p) => ({
+          plan_id: p.plan_id,
+          title: p.title,
+          goal: p.goal,
+          status: p.status,
+          error: p.error,
+          tasks: p.tasks.map((t) => ({
+            task_id: t.task_id,
+            plan_id: t.plan_id,
+            position: t.position,
+            title: t.title,
+            details: t.details,
+            status: t.status,
+            result: t.result,
+            error: t.error,
+            retries: t.retries,
+            timestamp: 0,
+          })) as TaskEventData[],
+          timestamp: 0,
+        })) as PlanEventData[]
+        setPlanHistory(mapped)
+        // If event replay hasn't already pinned a plan, default to the
+        // newest one so PlanPanel renders something on session restore.
+        setPlan((cur) => cur ?? mapped[0])
+      }).catch(() => {/* non-fatal */})
       // Synchronous ref so the for-loop's done/wait events don't tear down
       // the live chat connection. setState wouldn't apply until next render.
       replayingRef.current = true
@@ -431,6 +490,23 @@ export default function ChatPage() {
         replayingRef.current = false
       }
       setRealTime(true)
+      // Surface the preview iframe by default — every session has one
+      // (sandbox port mapping is reserved at create time), and the user
+      // wants to see the running app first, not whatever the agent's
+      // last tool call was. Agent tool events later in the session will
+      // replace this with their own content; the Preview tab stays
+      // available in the dropdown.
+      toolPanel.current?.showToolPanel(
+        {
+          tool_call_id: `synthetic-preview-${sessionId}`,
+          name: 'preview',
+          function: '',
+          args: {},
+          status: 'called',
+          timestamp: Date.now(),
+        } as ToolContent,
+        false,
+      )
       if (
         session.status === SessionStatus.RUNNING ||
         session.status === SessionStatus.PENDING
@@ -456,6 +532,8 @@ export default function ChatPage() {
     navMessageConsumedRef.current = false
     setMessages([])
     setPlan(undefined)
+    setPlanHistory([])
+    setViewedPlanIndex(0)
     setTitle('New Chat')
     setAttachments([])
     setShareMode('private')
@@ -805,11 +883,31 @@ export default function ChatPage() {
         </div>
 
         <div className="mx-auto w-full max-w-full sm:max-w-[768px] sm:min-w-[390px] flex flex-col flex-1">
-          {plan && plan.tasks?.length > 0 && (
-            <div className="sticky top-0 z-10 pt-2 pb-1 bg-[var(--background-gray-main)]">
-              <PlanPanel plan={plan} />
-            </div>
-          )}
+          {(() => {
+            // Pick which plan to render: the user's history selection
+            // (when they've stepped back) or the live `plan`. Falls back
+            // through both so the panel survives partial state during
+            // session restore.
+            const displayedPlan =
+              planHistory[viewedPlanIndex] ?? plan ?? planHistory[0]
+            if (!displayedPlan || displayedPlan.tasks.length === 0) return null
+            return (
+              <div className="sticky top-0 z-10 pt-2 pb-1 bg-[var(--background-gray-main)]">
+                <PlanPanel
+                  plan={displayedPlan}
+                  historyTotal={planHistory.length}
+                  historyIndex={viewedPlanIndex}
+                  onHistoryNav={(delta) => {
+                    setViewedPlanIndex((cur) => {
+                      const next = cur + delta
+                      if (next < 0 || next >= planHistory.length) return cur
+                      return next
+                    })
+                  }}
+                />
+              </div>
+            )
+          })()}
           <div
             ref={virtualParentRef}
             className="w-full pt-[12px] pb-[80px] flex-1"

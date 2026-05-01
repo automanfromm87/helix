@@ -59,6 +59,38 @@ export async function getSessionsSSE(
   return createSSEConnection<ListSessionResponse>('/sessions', { method: 'POST' }, callbacks)
 }
 
+export interface PlanItem {
+  plan_id: string
+  session_id: string
+  title: string
+  goal: string
+  status: 'planning' | 'executing' | 'completed' | 'failed'
+  error?: string | null
+  tasks: {
+    task_id: string
+    plan_id: string
+    position: number
+    title: string
+    details?: string | null
+    status: 'pending' | 'running' | 'completed' | 'failed' | 'blocked'
+    result?: string | null
+    error?: string | null
+    retries: number
+  }[]
+}
+
+/**
+ * List all plans for a session, newest first. Used by PlanPanel to
+ * navigate prior plans (e.g. follow-up turns produce new plan rows;
+ * the user wants to see what the prior turn's plan looked like).
+ */
+export async function listSessionPlans(sessionId: string): Promise<PlanItem[]> {
+  const response = await apiClient.get<ApiResponse<{ plans: PlanItem[] }>>(
+    `/sessions/${sessionId}/plans`,
+  )
+  return response.data.data.plans ?? []
+}
+
 export async function deleteSession(sessionId: string): Promise<void> {
   await apiClient.delete<ApiResponse<void>>(`/sessions/${sessionId}`)
 }

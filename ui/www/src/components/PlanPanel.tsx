@@ -4,8 +4,11 @@ import {
   Ban,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Circle,
+  History,
   Loader2,
 } from 'lucide-react'
 
@@ -15,6 +18,24 @@ import { cn } from '@/lib/utils'
 
 interface Props {
   plan: PlanEventData
+  /**
+   * Total plans on this session (for the "Plan N / M" indicator). When
+   * undefined or 1, the navigation row is hidden — single-plan sessions
+   * don't need it.
+   */
+  historyTotal?: number
+  /**
+   * Index into the history list the user is currently viewing.
+   * 0 = newest (= live plan), historyTotal-1 = oldest. When > 0, the
+   * panel shows a "viewing older plan" hint so the user knows the
+   * displayed plan isn't the live one.
+   */
+  historyIndex?: number
+  /**
+   * Callback fired when the user clicks ‹ or ›. `delta` is +1 (older)
+   * or -1 (newer). Parent clamps to bounds.
+   */
+  onHistoryNav?: (delta: 1 | -1) => void
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -205,7 +226,12 @@ function DetailRow({ task, last }: { task: TaskEventData; last: boolean }) {
 }
 
 
-export default function PlanPanel({ plan }: Props) {
+export default function PlanPanel({
+  plan,
+  historyTotal,
+  historyIndex,
+  onHistoryNav,
+}: Props) {
   const [collapsed, setCollapsed] = useState(false)
 
   const stats = useMemo(() => {
@@ -218,8 +244,78 @@ export default function PlanPanel({ plan }: Props) {
   const isDone = plan.status === 'completed'
   const isActive = plan.status === 'planning' || plan.status === 'executing'
 
+  // Navigation visible only when there's actual history. `historyIndex`
+  // counts from 0 = newest, so "older" = +1 and "newer" = -1.
+  const showNav =
+    typeof historyTotal === 'number' &&
+    historyTotal > 1 &&
+    typeof historyIndex === 'number' &&
+    typeof onHistoryNav === 'function'
+  const isViewingHistory = showNav && (historyIndex ?? 0) > 0
+  const canGoOlder = showNav && (historyIndex ?? 0) < (historyTotal ?? 1) - 1
+  const canGoNewer = showNav && (historyIndex ?? 0) > 0
+
   return (
     <div className="border border-[var(--border-main)] dark:border-[var(--border-light)] bg-[var(--background-menu-white)] rounded-[12px] shadow-[0px_0px_1px_0px_rgba(0,0,0,0.05),0px_4px_16px_0px_rgba(0,0,0,0.04)]">
+      {showNav && (
+        <div
+          className={cn(
+            'flex items-center justify-between gap-2 px-4 py-1.5 text-[11px] border-b border-[var(--border-light)]',
+            isViewingHistory
+              ? 'bg-[var(--fill-tsp-yellow-light,_rgba(255,196,0,0.08))] text-[var(--text-secondary)]'
+              : 'text-[var(--text-tertiary)]',
+          )}
+        >
+          <div className="flex items-center gap-1.5">
+            <History size={12} />
+            {isViewingHistory ? (
+              <span>
+                Viewing previous plan{' '}
+                <span className="font-semibold tabular-nums">
+                  {(historyIndex ?? 0) + 1} / {historyTotal}
+                </span>
+              </span>
+            ) : (
+              <span>
+                Latest plan{' '}
+                <span className="font-semibold tabular-nums">
+                  1 / {historyTotal}
+                </span>
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={!canGoOlder}
+              onClick={() => onHistoryNav?.(1)}
+              title="Older plan"
+              className={cn(
+                'h-6 w-6 inline-flex items-center justify-center rounded-md transition-colors',
+                canGoOlder
+                  ? 'hover:bg-[var(--fill-tsp-white-light)] text-[var(--text-secondary)]'
+                  : 'text-[var(--text-tertiary)] opacity-40 cursor-not-allowed',
+              )}
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <button
+              type="button"
+              disabled={!canGoNewer}
+              onClick={() => onHistoryNav?.(-1)}
+              title="Newer plan"
+              className={cn(
+                'h-6 w-6 inline-flex items-center justify-center rounded-md transition-colors',
+                canGoNewer
+                  ? 'hover:bg-[var(--fill-tsp-white-light)] text-[var(--text-secondary)]'
+                  : 'text-[var(--text-tertiary)] opacity-40 cursor-not-allowed',
+              )}
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+        </div>
+      )}
       <button
         onClick={() => setCollapsed((v) => !v)}
         className="w-full flex items-center gap-2 px-4 py-2.5 text-left"

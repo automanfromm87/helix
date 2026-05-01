@@ -1,11 +1,12 @@
 import type { ComponentType } from 'react'
-import { Edit3, Globe2, Search, Terminal as TerminalIcon, Wrench } from 'lucide-react'
+import { Edit3, Globe2, Monitor, Search, Terminal as TerminalIcon, Wrench } from 'lucide-react'
 
 import ShellToolView from '@/components/toolViews/ShellToolView'
 import FileToolView from '@/components/toolViews/FileToolView'
 import SearchToolView from '@/components/toolViews/SearchToolView'
 import BrowserToolView from '@/components/toolViews/BrowserToolView'
 import McpToolView from '@/components/toolViews/McpToolView'
+import PreviewToolView from '@/components/toolViews/PreviewToolView'
 import type { ToolContent } from '@/types/message'
 
 /** Tool function -> i18n key for human-readable description. */
@@ -68,6 +69,7 @@ export const TOOL_FUNCTION_ARG_MAP: Record<string, string> = {
 
 /** Tool category -> display name (i18n key). */
 export const TOOL_NAME_MAP: Record<string, string> = {
+  preview: 'Preview',
   shell: 'Terminal',
   file: 'File',
   browser: 'Browser',
@@ -78,6 +80,7 @@ export const TOOL_NAME_MAP: Record<string, string> = {
 
 /** Tool category -> icon component. Loose typing to support both lucide-react and custom SVG icons. */
 export const TOOL_ICON_MAP: Record<string, ComponentType<any>> = {
+  preview: Monitor,
   shell: TerminalIcon,
   file: Edit3,
   browser: Globe2,
@@ -88,6 +91,7 @@ export const TOOL_ICON_MAP: Record<string, ComponentType<any>> = {
 
 /** Tool category -> right-panel view component. */
 export const TOOL_COMPONENT_MAP: Record<string, ComponentType<ToolViewProps>> = {
+  preview: PreviewToolView,
   shell: ShellToolView,
   file: FileToolView,
   search: SearchToolView,
