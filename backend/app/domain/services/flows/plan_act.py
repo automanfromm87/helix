@@ -292,7 +292,14 @@ class PlanActFlow(BaseFlow):
             title=proposal.title,
             goal=proposal.goal,
             language=proposal.language,
-            tasks=[TaskInput(title=t.title, details=t.details) for t in proposal.tasks],
+            tasks=[
+                TaskInput(
+                    title=t.title,
+                    details=t.details,
+                    explicit_non_goals=t.explicit_non_goals,
+                )
+                for t in proposal.tasks
+            ],
         )
         await self._plan_service.mark_plan_executing(self.plan.id)
         self.plan = await self._plan_repository.find_plan(self.plan.id)
@@ -509,7 +516,12 @@ class PlanActFlow(BaseFlow):
             # Reverse the FAILED cascade: plan goes back to EXECUTING, the
             # blocked tasks are deleted, and new tasks take their slot.
             new_tasks = [
-                TaskInput(title=t.title, details=t.details) for t in decision.tasks
+                TaskInput(
+                    title=t.title,
+                    details=t.details,
+                    explicit_non_goals=t.explicit_non_goals,
+                )
+                for t in decision.tasks
             ]
             await self._plan_repository.replace_pending_tasks(
                 plan.id, failed_task.position, new_tasks
@@ -528,11 +540,68 @@ class PlanActFlow(BaseFlow):
             self.status = FlowStatus.EXECUTING
             return
 
-        # Abandon: keep the FAILED cascade, let the executor summarize what
-        # was actually delivered. Plan stays FAILED — but flow status moves
-        # to SUMMARIZING so we still produce a closing message.
+        if decision.decision == "split" and decision.tasks:
+            # SPLIT: insert sub-tasks AFTER the failed task, keep remaining
+            # pending tasks (un-block them since the cascade marked them
+            # BLOCKED on failure). The failed task itself stays FAILED for
+            # history; the sub-tasks run before whatever was queued.
+            new_tasks = [
+                TaskInput(
+                    title=t.title,
+                    details=t.details,
+                    explicit_non_goals=t.explicit_non_goals,
+                )
+                for t in decision.tasks
+            ]
+            await self._plan_repository.insert_tasks_after(
+                plan.id, failed_task.position, new_tasks
+            )
+            await self._plan_repository.unblock_remaining_tasks(
+                plan.id, failed_task.position
+            )
+            await self._plan_service.mark_plan_executing(plan.id)
+            self.plan = await self._plan_repository.find_plan(plan.id)
+            if self.plan:
+                yield PlanEvent(plan=self.plan, status=PlanStatus.EXECUTING)
+            failed = await self._plan_repository.find_task(failed_task.id)
+            if failed:
+                yield TaskEvent(task=failed, status=TaskStatus.FAILED)
+            logger.info(
+                "Plan %s recovered via split; %d sub-task(s) inserted",
+                plan.id, len(decision.tasks),
+            )
+            self.status = FlowStatus.EXECUTING
+            return
+
+        if decision.decision == "skip":
+            # SKIP: the failed task is treated as optional. Drop it from the
+            # active queue (it stays FAILED in history) and revive the
+            # remaining BLOCKED tasks so execution resumes after it.
+            await self._plan_repository.unblock_remaining_tasks(
+                plan.id, failed_task.position
+            )
+            await self._plan_service.mark_plan_executing(plan.id)
+            self.plan = await self._plan_repository.find_plan(plan.id)
+            if self.plan:
+                yield PlanEvent(plan=self.plan, status=PlanStatus.EXECUTING)
+            failed = await self._plan_repository.find_task(failed_task.id)
+            if failed:
+                yield TaskEvent(task=failed, status=TaskStatus.FAILED)
+            logger.info(
+                "Plan %s recovered via skip on task %s",
+                plan.id, failed_task.id,
+            )
+            self.status = FlowStatus.EXECUTING
+            return
+
+        # Abandon (also the fallback when "replan"/"split" came back without
+        # any tasks): keep the FAILED cascade, let the executor summarize
+        # what was actually delivered. Plan stays FAILED — but flow status
+        # moves to SUMMARIZING so we still produce a closing message.
         failed = await self._plan_repository.find_task(failed_task.id)
         if failed:
             yield TaskEvent(task=failed, status=TaskStatus.FAILED)
-        logger.info("Plan %s recovery decision: abandon", plan.id)
+        logger.info(
+            "Plan %s recovery decision: %s", plan.id, decision.decision
+        )
         self.status = FlowStatus.FAILED

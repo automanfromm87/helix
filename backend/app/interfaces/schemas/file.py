@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 from app.domain.models.file import FileInfo
 
@@ -13,6 +13,25 @@ class FileViewResponse(BaseModel):
     """File view response schema"""
     content: str
     file: str
+
+
+class FileListRequest(BaseModel):
+    """List a single directory level inside the sandbox."""
+    path: str
+    show_hidden: Optional[bool] = False
+
+
+class FileListEntry(BaseModel):
+    """One entry in a directory listing."""
+    name: str
+    path: str
+    is_dir: bool
+    size: int = 0
+
+
+class FileListResponse(BaseModel):
+    path: str
+    entries: List[FileListEntry] = []
 
 
 class FileInfoResponse(BaseModel):

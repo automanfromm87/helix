@@ -34,7 +34,10 @@ from app.domain.models.message import Message
 from app.domain.models.memory import Memory
 from app.domain.repositories.agent_repository import AgentRepository
 from app.domain.models.conv_message import (
+    ContentBlock,
     ConvMessage,
+    ImageBlock,
+    TextBlock,
     ToolResultBlock,
     ToolUseBlock,
     message_from_api,
@@ -270,15 +273,117 @@ class BaseAgent(ABC):
         return dropped
 
     # ------------------------------------------------------------------
+    # Request materialization + task-transition ack
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _materialize_request(
+        request: "str | List[Dict[str, Any]]",
+    ) -> List["ContentBlock"]:
+        """Convert the public `execute(request)` argument into a content
+        block list ready to drop into a ConvMessage. Tolerant of malformed
+        list entries — anything unrecognized is dropped, and an all-empty
+        result falls back to a single empty TextBlock so downstream
+        invariants (last-block exists, cache marker) still hold."""
+        if isinstance(request, str):
+            return [TextBlock(text=request)]
+        blocks: List[ContentBlock] = []
+        for raw in request:
+            if not isinstance(raw, dict):
+                continue
+            btype = raw.get("type")
+            if btype == "text":
+                blocks.append(TextBlock(text=raw.get("text", "")))
+            elif btype == "image":
+                src = raw.get("source") or {}
+                if isinstance(src, dict) and src.get("type") in {"base64", "url"}:
+                    blocks.append(ImageBlock(source=src))
+        if not blocks:
+            blocks = [TextBlock(text="")]
+        return blocks
+
+    def _dangling_submit_ack(self, memory: Memory) -> List["ContentBlock"]:
+        """Return synthetic tool_result blocks that close any unanswered
+        terminal submit_* tool_use(s) in the last assistant turn.
+
+        Empty list when there's nothing to close — i.e. the previous turn
+        wasn't an assistant turn, or none of its tool_uses were terminal
+        submits, or those tool_uses already have matching tool_results in
+        a later user turn.
+
+        This is the "boundary" mechanism: between tasks, the prior
+        submit_task_result tool_use gets answered with a textual ack in
+        the SAME user turn that introduces the next task. The model sees
+        a clear closure marker right next to the new task description,
+        so its attention re-anchors instead of drifting back to whatever
+        tool result was most recent before the close.
+        """
+        last = memory.get_last_message() if hasattr(memory, "get_last_message") else None
+        if last is None:
+            # Best-effort fallback when Memory doesn't expose get_last_message.
+            msgs = getattr(memory, "messages", None) or []
+            last = msgs[-1] if msgs else None
+        if last is None or last.role != "assistant":
+            return []
+        terminal_names = self._terminal_tool_names()
+        if not terminal_names:
+            return []
+        # Collect terminal tool_uses; skip non-terminal (those will get
+        # normal tool dispatch next time around if any).
+        terminal_uses = [
+            b for b in last.content
+            if isinstance(b, ToolUseBlock) and b.name in terminal_names
+        ]
+        if not terminal_uses:
+            return []
+        return [
+            ToolResultBlock(
+                tool_use_id=use.id,
+                content=(
+                    f"({use.name} acknowledged — proceeding to next task)"
+                ),
+            )
+            for use in terminal_uses
+        ]
+
+    # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
 
-    async def execute(self, request: str) -> AsyncGenerator[BaseEvent, None]:
+    async def execute(
+        self,
+        request: "str | List[Dict[str, Any]]",
+    ) -> AsyncGenerator[BaseEvent, None]:
         """Run a ReAct loop until the model emits a final text answer or
         a pause-tool (e.g. message_ask_user). Yields ToolEvents inline and a
-        single final MessageEvent on completion."""
+        single final MessageEvent on completion.
+
+        `request` is either a plain text prompt OR a list of pre-built
+        Anthropic content blocks (e.g. `[image_block, image_block, text_block]`)
+        for multimodal turns. The list form lets callers send image/text
+        mixes without the agent layer needing a file_storage dependency.
+
+        Task-transition ack: when memory's last turn is an assistant turn
+        ending with an unanswered terminal submit_* tool_use (i.e. the
+        previous task closed and we're starting a new one), this method
+        merges the synthetic tool_result that closes the prior tool_use
+        AND the new task content into a SINGLE user turn. The ack message
+        ("(submit_task_result acknowledged — proceeding to next task)")
+        gives the model a token-level visible boundary so its attention
+        re-anchors on the new task instead of being pulled by the prior
+        task's tool noise. Pattern borrowed from speedjs's plan_act.ml.
+        """
         memory = await self._ensure_memory()
-        memory.add_message(ConvMessage.user_text(request))
+        new_blocks = self._materialize_request(request)
+        ack_blocks = self._dangling_submit_ack(memory)
+        if ack_blocks:
+            # Single-turn ack-merge: tool_result(s) closing prior submit_* +
+            # new request content all in one user turn. Anthropic accepts
+            # mixed tool_result + text/image blocks in a user turn.
+            merged: List[ContentBlock] = list(ack_blocks) + list(new_blocks)
+            memory.add_message(ConvMessage(role="user", content=merged))
+        else:
+            memory.add_message(ConvMessage(role="user", content=list(new_blocks)))
         await self._persist()
 
         guard = LoopGuard()

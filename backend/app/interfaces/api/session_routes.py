@@ -22,7 +22,10 @@ from app.interfaces.schemas.session import (
 )
 from app.application.services.project_service import ProjectService
 from app.interfaces.dependencies import get_project_service
-from app.interfaces.schemas.file import FileViewRequest, FileViewResponse
+from app.interfaces.schemas.file import (
+    FileViewRequest, FileViewResponse,
+    FileListRequest, FileListResponse,
+)
 from app.interfaces.schemas.resource import AccessTokenRequest, SignedUrlResponse
 from app.interfaces.schemas.event import EventMapper
 from app.domain.models.file import FileInfo
@@ -296,6 +299,28 @@ async def view_file(
     """
     result = await agent_service.file_view(session_id, request.file, current_user.id)
     return APIResponse.success(result)
+
+
+@router.post("/{session_id}/file/list", response_model=APIResponse[FileListResponse])
+async def list_dir(
+    session_id: str,
+    request: FileListRequest,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> APIResponse[FileListResponse]:
+    """List one directory level inside the session's sandbox.
+
+    Used by the FE explorer tree — returns dirs sorted first then
+    alphabetical, with `.git` / `node_modules` etc. filtered by default.
+    """
+    data = await agent_service.file_list(
+        session_id=session_id,
+        dir_path=request.path,
+        user_id=current_user.id,
+        show_hidden=bool(request.show_hidden),
+    )
+    return APIResponse.success(FileListResponse(**data))
+
 
 @router.websocket("/{session_id}/vnc")
 async def vnc_websocket(

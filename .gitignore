@@ -1,3 +1,6 @@
+# Local Claude / agent tooling — never commit
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -5,7 +5,7 @@ from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from app.schemas.file import (
     FileReadRequest, FileWriteRequest, FileReplaceRequest,
-    FileSearchRequest, FileFindRequest
+    FileSearchRequest, FileFindRequest, FileListRequest,
 )
 from app.schemas.response import Response
 from app.services.file import file_service
@@ -89,6 +89,23 @@ async def search_in_file(request: FileSearchRequest):
         message=f"Search completed, found {len(result.matches)} matches",
         data=result.model_dump()
     )
+
+@router.post("/list", response_model=Response)
+async def list_dir(request: FileListRequest):
+    """List the immediate children of a directory.
+
+    Used by the FE explorer tree — returns dirs sorted first then
+    alphabetical, with hidden + noisy-generated dirs filtered by
+    default (set show_hidden to override)."""
+    result = await file_service.list_dir(
+        path=request.path, show_hidden=bool(request.show_hidden),
+    )
+    return Response(
+        success=True,
+        message=f"Listed {len(result.entries)} entr{'y' if len(result.entries) == 1 else 'ies'}",
+        data=result.model_dump(),
+    )
+
 
 @router.post("/find", response_model=Response)
 async def find_files(request: FileFindRequest):

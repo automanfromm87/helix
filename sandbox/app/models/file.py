@@ -41,3 +41,18 @@ class FileUploadResult(BaseModel):
     file_path: str = Field(..., description="Path of the uploaded file")
     file_size: int = Field(..., description="Size of the uploaded file in bytes")
     success: bool = Field(..., description="Whether upload was successful")
+
+
+class DirEntry(BaseModel):
+    """One immediate child of a directory listing."""
+    name: str = Field(..., description="Basename of the entry")
+    path: str = Field(..., description="Absolute path to the entry")
+    is_dir: bool = Field(..., description="Directory vs file")
+    size: int = Field(0, description="Size in bytes; 0 for directories or unknown")
+
+
+class FileListResult(BaseModel):
+    """Directory listing — single-level (lazy tree expansion is the
+    caller's job, so we don't recurse here)."""
+    path: str = Field(..., description="Absolute path of the directory listed")
+    entries: List[DirEntry] = Field([], description="Immediate children, dirs-first then alphabetical")

@@ -27,6 +27,20 @@ class TextBlock(_BlockBase):
     text: str
 
 
+class ImageBlock(_BlockBase):
+    """Anthropic vision content block.
+
+    `source` mirrors the wire format exactly so we don't have to translate
+    on serialize. Two source shapes are supported:
+      * base64 inline:  {"type": "base64", "media_type": "image/png", "data": "<b64>"}
+      * URL (Sonnet 4): {"type": "url", "url": "https://..."}
+    The agent only ever produces base64 inline (we control the bytes), but
+    we accept both on hydration so external tools that hand back URLs round-trip.
+    """
+    type: Literal["image"] = "image"
+    source: Dict[str, Any]
+
+
 class ToolUseBlock(_BlockBase):
     type: Literal["tool_use"] = "tool_use"
     id: str
@@ -41,7 +55,7 @@ class ToolResultBlock(_BlockBase):
     is_error: bool = False
 
 
-ContentBlock = Union[TextBlock, ToolUseBlock, ToolResultBlock]
+ContentBlock = Union[TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock]
 
 
 class ConvMessage(BaseModel):
@@ -78,6 +92,10 @@ def message_from_api(payload: Dict[str, Any]) -> ConvMessage:
         btype = raw.get("type")
         if btype == "text":
             blocks.append(TextBlock(text=raw.get("text", "")))
+        elif btype == "image":
+            src = raw.get("source") or {}
+            if isinstance(src, dict) and src.get("type") in {"base64", "url"}:
+                blocks.append(ImageBlock(source=src))
         elif btype == "tool_use":
             blocks.append(
                 ToolUseBlock(

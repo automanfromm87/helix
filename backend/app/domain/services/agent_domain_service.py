@@ -271,10 +271,30 @@ class AgentDomainService:
 
                 await self._session_repository.update_latest_message(session_id, message, timestamp or datetime.now())
 
+                # Hydrate FE-supplied attachment dicts into full FileInfo so
+                # downstream consumers (e.g. `_build_image_blocks` for vision)
+                # see content_type. Earlier this construction only kept
+                # file_id/filename and silently dropped content_type, which
+                # made every image attachment fall through the MIME gate
+                # and never reach Claude as a vision content block.
+                attach_models: Optional[List[FileInfo]] = None
+                if attachments:
+                    attach_models = []
+                    for raw in attachments:
+                        if not isinstance(raw, dict):
+                            continue
+                        attach_models.append(FileInfo(
+                            file_id=raw.get("file_id"),
+                            filename=raw.get("filename"),
+                            content_type=raw.get("content_type"),
+                            size=raw.get("size"),
+                            file_url=raw.get("file_url"),
+                            metadata=raw.get("metadata"),
+                        ))
                 message_event = MessageEvent(
-                    message=message, 
-                    role="user", 
-                    attachments=[FileInfo(file_id=attachment["file_id"], filename=attachment["filename"]) for attachment in attachments] if attachments else None
+                    message=message,
+                    role="user",
+                    attachments=attach_models,
                 )
 
                 event_id = await task.input_stream.put(message_event.model_dump_json())

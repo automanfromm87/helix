@@ -130,12 +130,25 @@ class Sandbox(Protocol):
     
     async def file_exists(self, path: str) -> ToolResult:
         """Check if file exists
-        
+
         Args:
             path: File path
-            
+
         Returns:
             Whether file exists
+        """
+        ...
+
+    async def file_list(self, path: str, show_hidden: bool = False) -> ToolResult:
+        """List one directory level (immediate children only).
+
+        Args:
+            path: Absolute directory path inside the sandbox.
+            show_hidden: Include dotfiles + noise dirs (.git, node_modules, …).
+
+        Returns:
+            ToolResult with `data = {path, entries: [{name, path, is_dir, size}]}`.
+            Dirs sorted first then alphabetical.
         """
         ...
     

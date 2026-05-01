@@ -1,5 +1,6 @@
-from typing import Optional, AsyncGenerator, List
+from typing import Any, Dict, Optional, AsyncGenerator, List
 import asyncio
+import base64
 import logging
 from pydantic import TypeAdapter
 from app.domain.models.message import Message
@@ -230,6 +231,60 @@ class AgentTaskRunner(TaskRunner):
             event.attachments = attachments
         except Exception as e:
             logger.exception(f"Agent {self._agent_id} failed to sync attachments to event: {e}")
+
+    # MIME types Anthropic vision accepts. Anything outside this list is
+    # treated as a regular file attachment (sandbox-only) — sending the
+    # bytes as an `image` block would just trip an API 400.
+    _SUPPORTED_VISION_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+    # Per-image inline cap. Claude allows up to ~5MB base64 per image; we
+    # enforce a tighter raw-bytes ceiling so multiple images don't blow the
+    # request payload. Above this, we skip vision and fall back to "file in
+    # sandbox" semantics for the agent.
+    _MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
+
+    async def _build_image_blocks(self, event: MessageEvent) -> List[Dict[str, Any]]:
+        """Materialize image attachments as Anthropic image content blocks.
+
+        Re-downloads each image-MIME attachment from file_storage and
+        base64-encodes it inline. Skipped silently if the file isn't an
+        image, exceeds size cap, or fails to download — the agent still
+        sees it as a regular file under /home/ubuntu/upload/."""
+        blocks: List[Dict[str, Any]] = []
+        if not event.attachments:
+            return blocks
+        for attachment in event.attachments:
+            mime = (attachment.content_type or "").lower()
+            if mime not in self._SUPPORTED_VISION_MIMES:
+                continue
+            if not attachment.file_id:
+                continue
+            try:
+                file_data, _ = await self._file_storage.download_file(
+                    attachment.file_id, self._user_id
+                )
+                raw = file_data.read() if hasattr(file_data, "read") else file_data
+                if isinstance(raw, str):
+                    raw = raw.encode()
+                if len(raw) > self._MAX_INLINE_IMAGE_BYTES:
+                    logger.info(
+                        "Skipping vision for %s — %d bytes exceeds cap %d",
+                        attachment.file_id, len(raw), self._MAX_INLINE_IMAGE_BYTES,
+                    )
+                    continue
+                blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime,
+                        "data": base64.b64encode(raw).decode("ascii"),
+                    },
+                })
+            except Exception:
+                logger.exception(
+                    "Failed to fetch image %s for vision content block",
+                    attachment.file_id,
+                )
+        return blocks
     
 
     # TODO: refactor this function
@@ -326,7 +381,12 @@ class AgentTaskRunner(TaskRunner):
                     
                 logger.info(f"Agent {self._agent_id} received new message: {message[:50]}...")
 
-                message_obj = Message(message=message, attachments=[attachment.file_path for attachment in event.attachments])
+                image_blocks = await self._build_image_blocks(event) if isinstance(event, MessageEvent) else []
+                message_obj = Message(
+                    message=message,
+                    attachments=[attachment.file_path for attachment in event.attachments],
+                    image_blocks=image_blocks,
+                )
                 
                 async for event in self._run_flow(message_obj):
                     await self._put_and_add_event(task, event)

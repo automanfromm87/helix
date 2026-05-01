@@ -6,7 +6,7 @@ produced via a single `submit_summary` tool_use call.
 """
 
 import logging
-from typing import AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -29,6 +29,7 @@ from app.domain.services.agents.base import (
 from app.domain.services.prompts.execution import (
     EXECUTION_PROMPT,
     EXECUTION_SYSTEM_PROMPT,
+    NON_GOALS_SECTION_TEMPLATE,
     SUMMARIZE_PROMPT,
 )
 from app.domain.services.prompts.system import SYSTEM_PROMPT
@@ -83,12 +84,26 @@ class ExecutionAgent(BaseAgent):
         pauses for `message_ask_user`. Tools used during the loop are the
         normal toolkits PLUS the `submit_task_result` terminal tool — the
         model picks the latter when it has a final answer."""
+        non_goals_section = ""
+        if task.explicit_non_goals:
+            items = "\n".join(f"  - {ng}" for ng in task.explicit_non_goals)
+            non_goals_section = NON_GOALS_SECTION_TEMPLATE.format(items=items)
         prompt = EXECUTION_PROMPT.format(
             step=task.description,
             message=user_message.message,
             attachments="\n".join(user_message.attachments),
             language=plan.language or "en",
+            non_goals_section=non_goals_section,
         )
+        # If the user message carried image attachments, send them as real
+        # vision content blocks so the model can actually look at them. The
+        # filename text already lives in the prompt template (the path list)
+        # so the model knows what's what.
+        request: "str | List[Dict[str, Any]]"
+        if user_message.image_blocks:
+            request = [*user_message.image_blocks, {"type": "text", "text": prompt}]
+        else:
+            request = prompt
 
         # Augment the executor's normal tools with the submit-result tool.
         # No forced tool_choice — the model picks freely. Submit-result is
@@ -107,7 +122,7 @@ class ExecutionAgent(BaseAgent):
         self._override_terminal_tools = {SUBMIT_TASK_RESULT_TOOL}
         try:
             submitted: Optional[dict] = None
-            async for event in self.execute(prompt):
+            async for event in self.execute(request):
                 # Submit-result is internal protocol; suppress its events.
                 if (
                     isinstance(event, ToolEvent)

@@ -48,6 +48,10 @@ class Task(BaseModel):
     position: int  # 0-indexed; agent works through these in order
     title: str = ""
     details: Optional[str] = None
+    # Out-of-scope items the executor MUST NOT pursue. Surfaced as a
+    # system reminder during the ReAct loop so the model treats matching
+    # tool failures as blockers rather than rabbit holes to fix.
+    explicit_non_goals: List[str] = Field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
     result: Optional[str] = None
     error: Optional[str] = None
@@ -88,6 +92,7 @@ class TaskInput(BaseModel):
 
     title: str
     details: Optional[str] = None
+    explicit_non_goals: List[str] = Field(default_factory=list)
 
 
 class Plan(BaseModel):

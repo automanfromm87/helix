@@ -331,6 +331,31 @@ class AgentService:
         else:
             raise RuntimeError(f"Failed to read file: {result.message}")
     
+    async def file_list(
+        self,
+        session_id: str,
+        dir_path: str,
+        user_id: str,
+        show_hidden: bool = False,
+    ) -> dict:
+        """List one directory level inside a session's sandbox.
+
+        Used by the FE explorer tree (lazy expand on click). Auth checks
+        match file_view: session must belong to the user."""
+        logger.info(f"Listing dir {dir_path!r} for session {session_id} user {user_id}")
+        session = await self._session_repository.find_by_id_and_user_id(session_id, user_id)
+        if not session:
+            raise NotFoundError("Session not found")
+        if not session.sandbox_id:
+            raise RuntimeError("Session has no sandbox environment")
+        sandbox = await self._sandbox_cls.get(session.sandbox_id)
+        if not sandbox:
+            raise RuntimeError("Sandbox environment not found")
+        result = await sandbox.file_list(dir_path, show_hidden=show_hidden)
+        if result.success:
+            return result.data
+        raise RuntimeError(f"Failed to list directory: {result.message}")
+
     async def is_session_shared(self, session_id: str) -> bool:
         """Check if a session is shared"""
         logger.info(f"Checking if session {session_id} is shared")

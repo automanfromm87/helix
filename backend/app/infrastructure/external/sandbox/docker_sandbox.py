@@ -351,6 +351,19 @@ class DockerSandbox(Sandbox):
         )
         return ToolResult(**response.json())
         
+    async def file_list(self, path: str, show_hidden: bool = False) -> ToolResult:
+        """List one directory level. Used by the FE explorer tree.
+
+        Args:
+            path: Absolute directory path inside the sandbox.
+            show_hidden: Include dotfiles + noisy generated dirs.
+        """
+        response = await self.client.post(
+            f"{self.base_url}/api/v1/file/list",
+            json={"path": path, "show_hidden": show_hidden},
+        )
+        return ToolResult(**response.json())
+
     async def file_exists(self, path: str) -> ToolResult:
         """Check if file exists
         
@@ -381,21 +394,6 @@ class DockerSandbox(Sandbox):
         )
         return ToolResult(**response.json())
         
-    async def file_list(self, path: str) -> ToolResult:
-        """List directory contents
-        
-        Args:
-            path: Directory path
-            
-        Returns:
-            List of directory contents
-        """
-        response = await self.client.post(
-            f"{self.base_url}/api/v1/file/list",
-            json={"path": path}
-        )
-        return ToolResult(**response.json())
-
     async def file_replace(self, file: str, old_str: str, new_str: str, sudo: bool = False) -> ToolResult:
         """Replace string in file
         

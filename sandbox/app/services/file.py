@@ -11,7 +11,8 @@ from typing import Optional, BinaryIO
 from fastapi import UploadFile
 from app.models.file import (
     FileReadResult, FileWriteResult, FileReplaceResult,
-    FileSearchResult, FileFindResult, FileUploadResult
+    FileSearchResult, FileFindResult, FileUploadResult,
+    DirEntry, FileListResult,
 )
 from app.core.exceptions import AppException, ResourceNotFoundException, BadRequestException
 
@@ -228,6 +229,62 @@ class FileService:
             matches=matches,
             line_numbers=line_numbers
         )
+
+    # Names to skip from directory listings by default — these directories
+    # are gigantic / vendored / generated and the FE tree shouldn't burn
+    # time enumerating them. The caller can opt in with `show_hidden=True`
+    # if they explicitly want to inspect them.
+    _NOISE_DIRS = frozenset({
+        ".git", "node_modules", "__pycache__", ".venv", "venv", ".cache",
+        ".next", ".nuxt", "dist", "build", ".mypy_cache", ".pytest_cache",
+        ".tox", "target", ".idea", ".vscode",
+    })
+
+    async def list_dir(
+        self, path: str, show_hidden: bool = False,
+    ) -> FileListResult:
+        """List the immediate children of a directory.
+
+        Single-level only — no recursion. The FE tree expands on demand,
+        so paying for a deep walk here would mostly waste cycles on
+        directories the user never opens. Dirs sort first then alphabetical
+        so an explorer-style ordering shows up without client-side sort.
+        """
+        if not os.path.exists(path):
+            raise ResourceNotFoundException(f"Directory does not exist: {path}")
+        if not os.path.isdir(path):
+            raise BadRequestException(f"Not a directory: {path}")
+
+        def scan() -> list:
+            entries: list[DirEntry] = []
+            with os.scandir(path) as it:
+                for ent in it:
+                    name = ent.name
+                    if not show_hidden:
+                        if name.startswith("."):
+                            continue
+                        if ent.is_dir(follow_symlinks=False) and name in self._NOISE_DIRS:
+                            continue
+                    try:
+                        is_dir = ent.is_dir(follow_symlinks=False)
+                        size = 0
+                        if not is_dir:
+                            try:
+                                size = ent.stat(follow_symlinks=False).st_size
+                            except OSError:
+                                size = 0
+                    except OSError:
+                        # Permission errors etc. — skip the entry rather than
+                        # poisoning the whole listing.
+                        continue
+                    entries.append(DirEntry(
+                        name=name, path=ent.path, is_dir=is_dir, size=size,
+                    ))
+            entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
+            return entries
+
+        entries = await asyncio.to_thread(scan)
+        return FileListResult(path=path, entries=entries)
 
     async def find_by_name(self, path: str, glob_pattern: str) -> FileFindResult:
         """

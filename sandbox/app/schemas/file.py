@@ -42,3 +42,12 @@ class FileFindRequest(BaseModel):
     """File find request"""
     path: str = Field(..., description="Directory path to search")
     glob: str = Field(..., description="Filename pattern (glob syntax)")
+
+
+class FileListRequest(BaseModel):
+    """Directory list request — single-level."""
+    path: str = Field(..., description="Absolute directory path to list")
+    show_hidden: Optional[bool] = Field(
+        False,
+        description="Include dot-files and noisy generated dirs (.git, node_modules, etc.)",
+    )

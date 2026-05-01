@@ -1,8 +1,10 @@
 """Postgres-backed PlanRepository."""
 
+import json
 import logging
+import re
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import uuid
 
 from sqlalchemy import delete, select, update
@@ -17,17 +19,55 @@ from app.infrastructure.models.sql import PlanRow, TaskRow
 logger = logging.getLogger(__name__)
 
 
+# Sentinel block we embed at the start of the `description` column to carry
+# `explicit_non_goals` without an alembic migration. Backwards-compatible:
+# rows without the sentinel just produce an empty list. Format chosen so it
+# survives a Markdown render unchanged (HTML comments are invisible).
+_NON_GOALS_SENTINEL = re.compile(
+    r"^<!--HELIX_NON_GOALS:(?P<json>\[.*?\])-->\n?", re.DOTALL
+)
+
+
+def _encode_description(details: Optional[str], non_goals: List[str]) -> Optional[str]:
+    """Combine details + non_goals into the single `description` column."""
+    body = details or ""
+    if non_goals:
+        prefix = f"<!--HELIX_NON_GOALS:{json.dumps(non_goals, ensure_ascii=False)}-->\n"
+        body = prefix + body
+    return body or None
+
+
+def _decode_description(raw: Optional[str]) -> Tuple[Optional[str], List[str]]:
+    """Split the stored `description` back into (details, non_goals)."""
+    if not raw:
+        return None, []
+    match = _NON_GOALS_SENTINEL.match(raw)
+    if not match:
+        return raw, []
+    try:
+        non_goals = json.loads(match.group("json"))
+        if not isinstance(non_goals, list):
+            non_goals = []
+    except json.JSONDecodeError:
+        non_goals = []
+    rest = raw[match.end():]
+    return (rest or None), [str(x) for x in non_goals]
+
+
 def _task_row_to_domain(row: TaskRow) -> Task:
     # Legacy rows wrote everything into `description` with no `title`;
     # surface those as title-only so the UI doesn't render an empty header.
-    title = row.title or (row.description or "")
-    details = row.description if row.title else None
+    raw_desc = row.description
+    decoded_details, non_goals = _decode_description(raw_desc)
+    title = row.title or (decoded_details or "")
+    details = decoded_details if row.title else None
     return Task(
         id=row.task_id,
         plan_id=row.plan_id,
         position=row.position,
         title=title,
         details=details,
+        explicit_non_goals=non_goals,
         status=TaskStatus(row.status),
         result=row.result,
         error=row.error,
@@ -85,7 +125,7 @@ class SqlPlanRepository(PlanRepository):
                         plan_id=plan_id,
                         position=i,
                         title=task.title,
-                        description=task.details,
+                        description=_encode_description(task.details, task.explicit_non_goals),
                         status=TaskStatus.PENDING.value,
                     )
                 )
@@ -197,6 +237,27 @@ class SqlPlanRepository(PlanRepository):
             await db.commit()
             return qres.rowcount or 0
 
+    async def unblock_remaining_tasks(self, plan_id: str, after_position: int) -> int:
+        """Reverse of `block_remaining_tasks`: flip BLOCKED tasks back to
+        PENDING. Used by SKIP and SPLIT recovery decisions to revive the
+        rest of the plan after a task is dropped or replaced."""
+        async with self._session_factory() as db:
+            qres = await db.execute(
+                update(TaskRow)
+                .where(
+                    TaskRow.plan_id == plan_id,
+                    TaskRow.position > after_position,
+                    TaskRow.status == TaskStatus.BLOCKED.value,
+                )
+                .values(
+                    status=TaskStatus.PENDING.value,
+                    error=None,
+                    completed_at=None,
+                )
+            )
+            await db.commit()
+            return qres.rowcount or 0
+
     async def increment_plan_recovery_count(self, plan_id: str) -> int:
         async with self._session_factory() as db:
             row = await db.get(PlanRow, plan_id)
@@ -218,6 +279,56 @@ class SqlPlanRepository(PlanRepository):
             )
             await db.commit()
             return result.rowcount or 0
+
+    async def insert_tasks_after(
+        self, plan_id: str, after_position: int, tasks: List[TaskInput]
+    ) -> List[Task]:
+        """Make room immediately after `after_position` and insert the given
+        tasks. Existing PENDING/BLOCKED rows past the cutoff are shifted
+        forward by `len(tasks)`. Completed/failed rows aren't touched.
+        """
+        if not tasks:
+            return []
+        shift = len(tasks)
+        async with self._session_factory() as db:
+            # Bump existing pending/blocked tasks past the cutoff to make
+            # room. Iterate from the highest position down so we don't trip
+            # the (plan_id, position) uniqueness while shifting.
+            existing = (
+                await db.execute(
+                    select(TaskRow)
+                    .where(
+                        TaskRow.plan_id == plan_id,
+                        TaskRow.position > after_position,
+                        TaskRow.status.in_(
+                            (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value)
+                        ),
+                    )
+                    .order_by(TaskRow.position.desc())
+                )
+            ).scalars().all()
+            for row in existing:
+                row.position = row.position + shift
+            await db.flush()
+            new_rows: List[TaskRow] = []
+            for offset, task in enumerate(tasks, start=1):
+                row = TaskRow(
+                    task_id=uuid.uuid4().hex[:16],
+                    plan_id=plan_id,
+                    position=after_position + offset,
+                    title=task.title,
+                    description=_encode_description(task.details, task.explicit_non_goals),
+                    status=TaskStatus.PENDING.value,
+                )
+                db.add(row)
+                new_rows.append(row)
+            await db.commit()
+        out: List[Task] = []
+        for row in new_rows:
+            t = await self.find_task(row.task_id)
+            if t:
+                out.append(t)
+        return out
 
     async def replace_pending_tasks(
         self, plan_id: str, after_position: int, tasks: List[TaskInput]
@@ -241,7 +352,7 @@ class SqlPlanRepository(PlanRepository):
                     plan_id=plan_id,
                     position=after_position + offset,
                     title=task.title,
-                    description=task.details,
+                    description=_encode_description(task.details, task.explicit_non_goals),
                     status=TaskStatus.PENDING.value,
                 )
                 db.add(row)

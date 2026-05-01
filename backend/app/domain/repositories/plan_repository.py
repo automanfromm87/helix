@@ -51,6 +51,11 @@ class PlanRepository(Protocol):
         given reason). Used after a hard task failure cascades."""
         ...
 
+    async def unblock_remaining_tasks(self, plan_id: str, after_position: int) -> int:
+        """Flip BLOCKED tasks (position > after_position) back to PENDING.
+        Used by SKIP / SPLIT recovery to revive the rest of the plan."""
+        ...
+
     async def replace_pending_tasks(
         self, plan_id: str, after_position: int, tasks: List[TaskInput]
     ) -> List[Task]:
@@ -58,6 +63,18 @@ class PlanRepository(Protocol):
         a fresh ordered list. Used by the recovery path when the planner
         decides to rewrite the remainder of the plan after a failure.
         Returns the new tasks in position order."""
+        ...
+
+    async def insert_tasks_after(
+        self, plan_id: str, after_position: int, tasks: List[TaskInput]
+    ) -> List[Task]:
+        """Insert new tasks immediately after `after_position`, shifting any
+        existing PENDING/BLOCKED tasks at later positions to make room.
+        Used by the SPLIT recovery decision: replace ONE failed task with
+        smaller sub-tasks while keeping the remaining tasks intact.
+
+        Returns the inserted tasks in position order. Completed/failed
+        tasks are not touched (they're history)."""
         ...
 
     async def increment_plan_recovery_count(self, plan_id: str) -> int:
