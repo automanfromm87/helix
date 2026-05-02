@@ -61,6 +61,7 @@ class AgentTaskRunner(TaskRunner):
         project_repository: Optional[ProjectRepository] = None,
         project_id: Optional[str] = None,
         skill_repository=None,
+        has_context_files: bool = False,
     ):
         self._session_id = session_id
         self._agent_id = agent_id
@@ -93,6 +94,7 @@ class AgentTaskRunner(TaskRunner):
             self._search_engine,
             extra_system_prompt=extra_system_prompt,
             skill_repository=skill_repository,
+            has_context_files=has_context_files,
         )
 
     async def _put_and_add_event(self, task: Task, event: AgentEvent) -> None:

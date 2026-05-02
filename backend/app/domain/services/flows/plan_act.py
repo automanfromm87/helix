@@ -45,6 +45,7 @@ from app.domain.services.tools.browser import BrowserToolkit
 from app.domain.services.tools.file import FileToolkit
 from app.domain.services.tools.mcp import MCPToolkit
 from app.domain.services.tools.message import MessageToolkit
+from app.domain.services.tools.retrieve import RetrieveToolkit
 from app.domain.services.tools.search import SearchToolkit
 from app.domain.services.tools.shell import ShellToolkit
 from app.domain.repositories.skill_repository import SkillRepository
@@ -84,6 +85,7 @@ class PlanActFlow(BaseFlow):
         search_engine: Optional[SearchEngine] = None,
         extra_system_prompt: Optional[str] = None,
         skill_repository: Optional[SkillRepository] = None,
+        has_context_files: bool = False,
     ):
         self._agent_id = agent_id
         self._repository = agent_repository
@@ -110,6 +112,11 @@ class PlanActFlow(BaseFlow):
             tools.append(SearchToolkit(search_engine))
         if skill_repository is not None and skill_repository.list():
             tools.append(SkillToolkit(skill_repository))
+        # Only expose `retrieve` when the session actually has context
+        # files attached. Showing the tool with nothing to search would
+        # tempt the model to call it speculatively, wasting a turn.
+        if has_context_files:
+            tools.append(RetrieveToolkit(session_id, session_repository))
 
         self.planner = PlannerAgent(
             agent_id=self._agent_id,

@@ -188,6 +188,10 @@ class AgentDomainService:
             project_repository=self._project_repository,
             project_id=session.project_id,
             skill_repository=skill_repository,
+            # Gates the `retrieve` toolkit so the agent doesn't see a
+            # tool with nothing to search. Re-evaluated on each task
+            # creation, so a file added mid-session shows up next turn.
+            has_context_files=bool(context_files),
         )
 
         task = self._task_cls.create(task_runner)
