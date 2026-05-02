@@ -33,6 +33,12 @@ interface Props {
   onStop?: () => void
   hideStopButton?: boolean
   allowSendFilesOnly?: boolean
+  /** Override the default placeholder. Used when the agent is paused on
+   * `message_ask_user` and the input semantically becomes "your reply"
+   * rather than "your next task". Without this, users stare at "Give
+   * Helix a task to work on..." and don't realize they're already in a
+   * dialog with a pending question. */
+  placeholder?: string
 }
 
 export interface ChatBoxHandle {
@@ -55,6 +61,7 @@ const ChatBox = forwardRef<ChatBoxHandle, Props>(
       onStop,
       hideStopButton,
       allowSendFilesOnly,
+      placeholder = 'Give Helix a task to work on...',
     },
     ref,
   ) => {
@@ -137,7 +144,7 @@ const ChatBox = forwardRef<ChatBoxHandle, Props>(
               onCompositionStart={() => setIsComposing(true)}
               onCompositionEnd={() => setIsComposing(false)}
               onKeyDown={handleEnter}
-              placeholder="Give Helix a task to work on..."
+              placeholder={placeholder}
               style={{ height: '46px' }}
             />
           </div>

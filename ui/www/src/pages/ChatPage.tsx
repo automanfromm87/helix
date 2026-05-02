@@ -101,6 +101,14 @@ export default function ChatPage() {
   const [linkCopied, setLinkCopied] = useState(false)
   const [sharingLoading, setSharingLoading] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // True after a `wait` SSE event arrived and the user hasn't replied
+  // yet — i.e. the agent paused on `message_ask_user`. Drives the
+  // ChatBox placeholder so the user sees "Reply to Helix's question"
+  // instead of the default "Give Helix a task to work on...".
+  // Cleared on any user submit (regardless of whether the wait was
+  // tied to that exact prompt — close enough; the agent will simply
+  // keep going with whatever the user said next).
+  const [awaitingReply, setAwaitingReply] = useState(false)
 
   const lastNoMessageTool = useRef<ToolContent | undefined>()
   const lastTool = useRef<ToolContent | undefined>()
@@ -356,6 +364,10 @@ export default function ChatPage() {
             cancelCurrentChat.current?.()
             cancelCurrentChat.current = null
             chatInFlightRef.current = false
+            // `wait` = agent paused for user input (message_ask_user).
+            // `done` = agent finished its turn — clear any prior wait
+            // flag in case the FE missed the transition.
+            setAwaitingReply(event.event === 'wait')
           }
           break
         default:
@@ -1077,9 +1089,15 @@ export default function ChatPage() {
               onSubmit={() => {
                 const ctx = selectedContexts.map(inspectorContextBlock).join('\n\n')
                 const merged = ctx ? `${ctx}\n\n${inputMessage}`.trim() : inputMessage
+                setAwaitingReply(false)
                 void chat(merged, attachments)
               }}
               onStop={handleStop}
+              placeholder={
+                awaitingReply
+                  ? "Reply to Helix's question..."
+                  : 'Give Helix a task to work on...'
+              }
             />
           </div>
         </div>
