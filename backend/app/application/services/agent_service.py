@@ -622,31 +622,36 @@ class AgentService:
         """Return the `http://localhost:<port>` preview URL for the
         session's dev server, or None if it's not actually reachable.
 
-        Pure read — `lookup_alive` doesn't spawn. The iframe polls this
-        endpoint while warming up; if we created on poll we'd race with
-        chat-warmup's create. The flow is:
+        Re-spawns a dead sandbox via the registry when the user opens
+        a session whose container is gone (TTL no longer applies but
+        old containers from before that change, daemon restarts, OOM
+        kills, hand-stop with `docker rm` all leave session.sandbox_id
+        pointing at a tombstone). The original concern with
+        spawn-from-poll was a race against chat-warmup's spawn, but
+        the registry's per-session lock now dedups them: only one
+        outstanding create per session no matter who triggered it.
 
-          1. Registry verifies the bound container is alive (cache or
-             docker inspect). If it's gone the cache is dropped and we
-             return None — user gets "no preview yet"; whichever route
-             actively wants a sandbox (chat, file_view, vnc) will
-             respawn through `ensure_for_session`.
+        Flow:
+          1. `ensure_for_session` returns a verified-live sandbox or
+             spawns one. NotFoundError → return None (session was
+             deleted).
           2. HEAD-probe the sandbox's *internal* URL (docker-network
-             IP, container port 5173). Backend's own `localhost` is
-             itself, so probing `localhost:<host_port>` from here
-             always fails even when vite is up; the user's browser
-             reaches that same host port directly because the iframe
-             runs on the host.
-          3. If probe fails, drop the cache entry — could be vite
-             crashed even though container is alive (supervisord will
-             restart it; next poll picks it up) or container died
+             IP + container port 5173). Backend container's own
+             localhost is itself, so probing the host-facing
+             `localhost:<host_port>` from here always fails even when
+             vite is up. Browser reaches the same host port directly
+             because the iframe runs on the host.
+          3. Probe fail → drop the cache entry. Could be vite crashed
+             inside a healthy container (supervisord will restart it
+             on its own; next poll picks it up) or the container died
              between the registry's last check and now.
         """
         import httpx
 
         logger.info(f"Getting preview URL for session {session_id}")
-        sandbox = await self._sandbox_registry.lookup_alive(session_id)
-        if sandbox is None:
+        try:
+            sandbox = await self._sandbox_registry.ensure_for_session(session_id)
+        except NotFoundError:
             return None
 
         url = getattr(sandbox, "preview_url", None)
