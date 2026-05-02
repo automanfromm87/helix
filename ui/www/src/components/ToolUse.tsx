@@ -7,15 +7,53 @@ interface Props {
   onClick?: () => void
 }
 
+/**
+ * Single-source-of-truth event name for "user clicked an option button
+ * inside an `message_ask_user` tool render". Picked up in ChatPage,
+ * which dispatches the option text through the regular `chat()` path.
+ * A window event is the lightest decoupling between the deeply-nested
+ * render tree (Message → Tool → ToolUse) and the chat dispatcher,
+ * matching the existing `helix:preview:select` convention.
+ */
+export const REPLY_WITH_OPTION_EVENT = 'helix:reply-with-option'
+
 export default function ToolUse({ tool, onClick }: Props) {
   const toolInfo = useToolInfo(tool)
   const { relativeTime } = useRelativeTime()
 
   if (tool.name === 'message' && tool.args?.text) {
+    const opts: unknown = tool.args.options
+    const options: string[] = Array.isArray(opts)
+      ? opts.filter((o): o is string => typeof o === 'string' && o.trim().length > 0)
+      : []
+    const isAskUser = tool.function === 'message_ask_user'
     return (
-      <p className="text-[var(--text-secondary)] text-[14px] overflow-hidden text-ellipsis whitespace-pre-line">
-        {tool.args.text}
-      </p>
+      <div className="flex flex-col gap-2">
+        <p className="text-[var(--text-secondary)] text-[14px] whitespace-pre-line">
+          {tool.args.text}
+        </p>
+        {isAskUser && options.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-1">
+            {options.map((opt, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => {
+                  // Stop propagation so click doesn't also fire the
+                  // outer message-row's onClick (which opens the tool
+                  // panel and would feel mispredicted here).
+                  window.dispatchEvent(
+                    new CustomEvent(REPLY_WITH_OPTION_EVENT, { detail: opt }),
+                  )
+                }}
+                className="inline-flex items-center max-w-full text-left px-3 py-1.5 rounded-md border border-[var(--border-btn-main)] bg-[var(--fill-tsp-white-light)] text-[13px] text-[var(--text-primary)] hover:bg-[var(--text-brand)] hover:text-white hover:border-[var(--text-brand)] transition-colors"
+              >
+                <span className="truncate">{opt}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     )
   }
 

@@ -673,6 +673,24 @@ export default function ChatPage() {
     return () => window.removeEventListener('helix:preview:select', onSelect)
   }, [])
 
+  // ToolUse renders option buttons under any `message_ask_user` whose
+  // args carry an `options` array. Click → option text dispatched here
+  // → forwarded straight to chat() so the agent loop resumes with the
+  // user's choice as the literal reply. We don't filter on
+  // `awaitingReply`: a user clicking an option from history (e.g.
+  // realizing later they wanted a different answer) gets to send it as
+  // a fresh message — same semantics as typing it manually.
+  useEffect(() => {
+    const onReply = (e: Event) => {
+      const text = (e as CustomEvent<string>).detail
+      if (!text) return
+      setAwaitingReply(false)
+      void chat(text, [])
+    }
+    window.addEventListener('helix:reply-with-option', onReply)
+    return () => window.removeEventListener('helix:reply-with-option', onReply)
+  }, [chat])
+
   const handleScroll = () => {
     setFollow(simpleBarRef.current?.isScrolledToBottom() ?? false)
   }
