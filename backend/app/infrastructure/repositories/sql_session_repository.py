@@ -467,6 +467,21 @@ class SqlSessionRepository(SessionRepository):
             await db.commit()
             return result.rowcount or 0
 
+    async def find_ids_and_sandbox_by_project_id(
+        self, project_id: str, user_id: str
+    ) -> list[tuple[str, Optional[str]]]:
+        """Returns [(session_id, sandbox_id), ...] — used by cleanup paths
+        that need to destroy sandbox containers + bind-mount dirs before
+        the bulk DB delete drops the rows."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SessionRow.session_id, SessionRow.sandbox_id).where(
+                    SessionRow.project_id == project_id,
+                    SessionRow.user_id == user_id,
+                )
+            )
+            return [(r.session_id, r.sandbox_id) for r in result.all()]
+
     async def list_in_flight_sessions(self) -> list[tuple[str, str]]:
         """Return (session_id, agent_id) pairs for sessions that were active
         when the previous backend process died — used by the startup

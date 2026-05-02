@@ -130,6 +130,21 @@ class DockerSandbox(Sandbox):
         return f"http://localhost:{self._preview_host_port}"
 
     @property
+    def preview_internal_url(self) -> Optional[str]:
+        """Backend-side URL for liveness probing — uses the sandbox
+        container's internal IP + container port (5173).
+
+        The host-facing `preview_url` is `localhost:<host_port>`; that
+        resolves correctly from a browser running on the docker host
+        but NOT from another container (where `localhost` is itself,
+        not the host). Probing from inside the backend container
+        therefore needs the sandbox's docker-network IP directly.
+        """
+        if not self.ip:
+            return None
+        return f"http://{self.ip}:5173"
+
+    @property
     def shell_stream_url(self) -> str:
         # Same port as the rest of the sandbox HTTP API — FastAPI handles
         # both HTTP and WS upgrades on 8080. Cols/rows/cwd are passed as
@@ -689,7 +704,19 @@ class DockerSandbox(Sandbox):
         Called during backend startup to clean up sandboxes left behind by a
         crashed previous run. No-op when not running in Docker mode (i.e.
         SANDBOX_ADDRESS is set), because no containers will carry the label.
+
+        Containers younger than _REAP_GRACE_SECONDS are skipped — this
+        protects against a dev-mode race where uvicorn `--reload` restarts
+        the backend while a sandbox was just spawned: the new process's
+        active-sandbox list may briefly miss the freshly-saved row, and
+        without a grace period the reaper would kill a healthy in-flight
+        sandbox mid-task (caller would see `ConnectError: All connection
+        attempts failed`).
         """
+        from datetime import datetime, timezone
+
+        _REAP_GRACE_SECONDS = 90
+
         try:
             docker_client = docker.from_env()
         except Exception as e:
@@ -705,10 +732,32 @@ class DockerSandbox(Sandbox):
             logger.warning("reap_orphans: failed to list containers: %s", e)
             return 0
 
+        now = datetime.now(timezone.utc)
         reaped = 0
         for c in containers:
             if c.name in active_container_names:
                 continue
+            # Docker `Created` is ISO8601 in UTC. Parse defensively — older
+            # docker SDKs return microsecond precision that fromisoformat
+            # only handles up to 6 digits, so trim trailing nanos.
+            created_raw = c.attrs.get("Created", "")
+            try:
+                created_clean = created_raw.split(".")[0] if created_raw else ""
+                if created_clean.endswith("Z"):
+                    created_clean = created_clean[:-1] + "+00:00"
+                created_at = datetime.fromisoformat(created_clean) if created_clean else None
+                if created_at and created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+            except Exception:
+                created_at = None
+
+            if created_at and (now - created_at).total_seconds() < _REAP_GRACE_SECONDS:
+                logger.debug(
+                    "reap_orphans: skipping young container %s (age %.1fs < %ds grace)",
+                    c.name, (now - created_at).total_seconds(), _REAP_GRACE_SECONDS,
+                )
+                continue
+
             try:
                 c.remove(force=True)
                 reaped += 1
@@ -718,11 +767,17 @@ class DockerSandbox(Sandbox):
         return reaped
 
     @classmethod
-    @alru_cache(maxsize=128, typed=True)
+    @alru_cache(maxsize=128, typed=True, ttl=10.0)
     async def get(cls, id: str) -> Sandbox:
         """Get sandbox by ID. Raises `SandboxUnavailableError` (→ 503 to FE)
         when the container is gone — common after switching dev modes,
-        cleaning the janitor, or simply because the operator stopped it."""
+        cleaning the janitor, or simply because the operator stopped it.
+
+        Cache TTL is 10s: long enough to absorb hot-path bursts (file_view,
+        chat-loop polling) without thrashing docker, short enough that if a
+        container does die out-of-band, `_resolve_or_recreate_sandbox`
+        sees the SandboxUnavailableError on the next miss and respawns
+        rather than handing back stale IPs forever."""
         settings = get_settings()
         if settings.sandbox_address:
             ip = await cls._resolve_hostname_to_ip(settings.sandbox_address)

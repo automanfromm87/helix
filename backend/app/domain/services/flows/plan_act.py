@@ -12,9 +12,12 @@ fails the task, marks every later task BLOCKED, fails the plan, and exits.
 
 import logging
 from enum import Enum
+from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 from app.application.services.plan_service import PlanService
+from app.core.config import get_settings
+from app.infrastructure.external.git.plan_versioning import commit_plan
 from app.domain.external.browser import Browser
 from app.domain.external.sandbox import Sandbox
 from app.domain.external.search import SearchEngine
@@ -198,6 +201,25 @@ class PlanActFlow(BaseFlow):
             elif self.status == FlowStatus.COMPLETED:
                 if self.plan:
                     await self._plan_service.mark_plan_completed(self.plan.id)
+                    # Snapshot the project state as a tagged git commit so
+                    # the user can diff/restore versions per plan. Failures
+                    # are non-blocking — versioning is metadata, not a hard
+                    # gate on completion.
+                    project_path = Path(
+                        get_settings().sandbox_data_host_root
+                    ) / self._session_id / "project"
+                    info = await commit_plan(
+                        project_path, self.plan.id, self.plan.title or self.plan.goal,
+                    )
+                    if info:
+                        try:
+                            await self._plan_repository.set_commit_sha(
+                                self.plan.id, info.sha,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to persist commit_sha for plan %s", self.plan.id,
+                            )
                     self.plan = await self._plan_repository.find_plan(self.plan.id)
                     if self.plan:
                         yield PlanEvent(plan=self.plan, status=PlanStatus.COMPLETED)

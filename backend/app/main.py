@@ -182,6 +182,10 @@ async def lifespan(app: FastAPI):
         await conn.execute(text(
             "ALTER TABLE plans ADD COLUMN IF NOT EXISTS recovery_count INTEGER NOT NULL DEFAULT 0"
         ))
+        # Plan-as-version: auto-commit SHA produced when a plan completes.
+        await conn.execute(text(
+            "ALTER TABLE plans ADD COLUMN IF NOT EXISTS commit_sha VARCHAR(40)"
+        ))
     logger.info("Postgres schema ensured")
 
     # Crash recovery: a previous backend run was killed mid-task. For every

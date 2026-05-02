@@ -58,6 +58,10 @@ RUN mkdir -p /etc/apt/keyrings && \
 # Configure npm to use Aliyun mirror
 RUN npm config set registry https://registry.npmmirror.com
 
+# Install pnpm (faster + content-addressable global store, used by the
+# helix-dev-runner to bring up Vite dev servers automatically).
+RUN npm install -g pnpm@9 && pnpm config set registry https://registry.npmmirror.com
+
 # Install Google Chrome
 RUN add-apt-repository ppa:xtradeb/apps -y && \
     apt-get update && \
@@ -97,6 +101,12 @@ RUN chown -R ubuntu:ubuntu /app
 
 # Configure supervisor
 COPY supervisord.conf /etc/supervisor/conf.d/app.conf
+
+# Helix-managed dev server runner. Owned by supervisord, not the agent —
+# this is the "service that's always running when project files exist"
+# guarantee. See sandbox/helix-dev-runner.sh for stack detection logic.
+COPY helix-dev-runner.sh /usr/local/bin/helix-dev-runner.sh
+RUN chmod +x /usr/local/bin/helix-dev-runner.sh
 
 # Expose ports
 EXPOSE 8080 9222 5900 5901

@@ -111,6 +111,10 @@ class Plan(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: Optional[datetime] = None
+    # Auto-set when the plan finishes and `git commit` succeeds against
+    # the session's project dir. Used by the FE to show "v3 · abc123" +
+    # diff/restore affordances.
+    commit_sha: Optional[str] = None
 
     def next_pending(self) -> Optional[Task]:
         for task in sorted(self.tasks, key=lambda t: t.position):

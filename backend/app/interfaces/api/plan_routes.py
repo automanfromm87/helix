@@ -1,14 +1,31 @@
-from fastapi import APIRouter, Depends
+from pathlib import Path
 
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.application.services.agent_service import AgentService
 from app.application.services.plan_service import PlanService
+from app.application.services.project_service import ProjectService
+from app.core.config import get_settings
 from app.domain.models.plan import Plan
 from app.domain.models.user import User
-from app.interfaces.dependencies import get_current_user, get_plan_service
+from app.infrastructure.external.git.plan_versioning import (
+    diff_plan,
+    restore_to_plan,
+)
+from app.interfaces.dependencies import (
+    get_agent_service,
+    get_current_user,
+    get_plan_service,
+    get_project_service,
+)
 from app.interfaces.schemas.base import APIResponse
 from app.interfaces.schemas.plan import (
     GetPlanResponse,
     ListPlansResponse,
+    PlanDiffResponse,
+    PlanForkResponse,
     PlanItem,
+    PlanRestoreResponse,
     TaskItem,
 )
 
@@ -24,6 +41,7 @@ def _to_item(plan: Plan) -> PlanItem:
         goal=plan.goal,
         status=plan.status,
         error=plan.error,
+        commit_sha=plan.commit_sha,
         tasks=[
             TaskItem(
                 task_id=t.id,
@@ -39,6 +57,10 @@ def _to_item(plan: Plan) -> PlanItem:
             for t in sorted(plan.tasks, key=lambda t: t.position)
         ],
     )
+
+
+def _project_path_for(session_id: str) -> Path:
+    return Path(get_settings().sandbox_data_host_root) / session_id / "project"
 
 
 @router.get(
@@ -82,3 +104,72 @@ async def get_plan(
 ) -> APIResponse[GetPlanResponse]:
     plan = await plan_service.get_plan(plan_id, current_user.id)
     return APIResponse.success(GetPlanResponse(plan=_to_item(plan)))
+
+
+@router.get(
+    "/plans/{plan_id}/diff",
+    response_model=APIResponse[PlanDiffResponse],
+)
+async def get_plan_diff(
+    plan_id: str,
+    current_user: User = Depends(get_current_user),
+    plan_service: PlanService = Depends(get_plan_service),
+) -> APIResponse[PlanDiffResponse]:
+    """Unified diff between this plan's snapshot and its predecessor.
+    Returns an empty diff string if the plan never produced a commit
+    (e.g. plans that completed without any file changes)."""
+    plan = await plan_service.get_plan(plan_id, current_user.id)
+    diff = await diff_plan(_project_path_for(plan.session_id), plan_id)
+    return APIResponse.success(
+        PlanDiffResponse(plan_id=plan_id, commit_sha=plan.commit_sha, diff=diff)
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/restore",
+    response_model=APIResponse[PlanRestoreResponse],
+)
+async def restore_plan(
+    plan_id: str,
+    current_user: User = Depends(get_current_user),
+    plan_service: PlanService = Depends(get_plan_service),
+) -> APIResponse[PlanRestoreResponse]:
+    """Hard-reset the project tree to this plan's snapshot.
+    Destructive — caller is responsible for confirming with the user."""
+    plan = await plan_service.get_plan(plan_id, current_user.id)
+    if not plan.commit_sha:
+        raise HTTPException(status_code=400, detail="Plan has no commit to restore")
+    ok = await restore_to_plan(_project_path_for(plan.session_id), plan_id)
+    return APIResponse.success(PlanRestoreResponse(plan_id=plan_id, restored=ok))
+
+
+@router.post(
+    "/plans/{plan_id}/fork",
+    response_model=APIResponse[PlanForkResponse],
+)
+async def fork_plan(
+    plan_id: str,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+    plan_service: PlanService = Depends(get_plan_service),
+    project_service: ProjectService = Depends(get_project_service),
+) -> APIResponse[PlanForkResponse]:
+    """Create a new session that starts from this plan's snapshot on a
+    fresh git branch. The fork goes into a brand-new project so the
+    sidebar (1 project = 1 visible session) shows original + fork as
+    siblings instead of one displacing the other.
+    Returns the new session id; FE navigates there."""
+    try:
+        plan = await plan_service.get_plan(plan_id, current_user.id)
+        fork_project_obj = await project_service.create_project(
+            current_user.id,
+            name=f"Fork: {plan.title or plan.goal or 'plan'}"[:120],
+        )
+        new_session = await agent_service.fork_from_plan(
+            plan_id, current_user.id, target_project_id=fork_project_obj.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return APIResponse.success(
+        PlanForkResponse(plan_id=plan_id, new_session_id=new_session.id)
+    )

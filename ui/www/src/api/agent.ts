@@ -66,6 +66,7 @@ export interface PlanItem {
   goal: string
   status: 'planning' | 'executing' | 'completed' | 'failed'
   error?: string | null
+  commit_sha?: string | null
   tasks: {
     task_id: string
     plan_id: string
@@ -89,6 +90,59 @@ export async function listSessionPlans(sessionId: string): Promise<PlanItem[]> {
     `/sessions/${sessionId}/plans`,
   )
   return response.data.data.plans ?? []
+}
+
+export async function getPlanDiff(planId: string): Promise<{
+  plan_id: string
+  commit_sha: string | null
+  diff: string
+}> {
+  const response = await apiClient.get<
+    ApiResponse<{ plan_id: string; commit_sha: string | null; diff: string }>
+  >(`/plans/${planId}/diff`)
+  return response.data.data
+}
+
+export async function restorePlan(planId: string): Promise<boolean> {
+  const response = await apiClient.post<
+    ApiResponse<{ plan_id: string; restored: boolean }>
+  >(`/plans/${planId}/restore`)
+  return response.data.data?.restored ?? false
+}
+
+export async function forkPlan(planId: string): Promise<string> {
+  // Per-request timeout overrides the apiClient default (30s). Fork copies
+  // the project tree (`shutil.copytree`, excluding node_modules but still
+  // potentially many files) and on a busy host with several concurrent
+  // sandbox lifecycle ops in flight the response can take 1-2 minutes.
+  // 30s default would surface as a spurious "Network error" toast even
+  // though the server completes the fork — leaving the user with an
+  // orphan session they didn't know was created.
+  const response = await apiClient.post<
+    ApiResponse<{ plan_id: string; new_session_id: string }>
+  >(`/plans/${planId}/fork`, undefined, { timeout: 5 * 60 * 1000 })
+  return response.data.data.new_session_id
+}
+
+export interface MergeResult {
+  status: 'merged' | 'resolved' | 'conflict' | 'noop' | 'failed'
+  target_session_id: string
+  source_session_id: string
+  commit_sha: string | null
+  resolved_files: string[]
+  unresolved_files: string[]
+  error: string | null
+  plan_id: string | null
+}
+
+export async function mergeSessions(
+  sessionA: string,
+  sessionB: string,
+): Promise<MergeResult> {
+  const response = await apiClient.post<ApiResponse<MergeResult>>(
+    `/sessions/${sessionA}/merge-with/${sessionB}`,
+  )
+  return response.data.data
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {

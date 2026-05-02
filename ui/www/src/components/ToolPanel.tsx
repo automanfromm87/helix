@@ -46,19 +46,31 @@ const ToolPanel = forwardRef<ToolPanelHandle, Props>(
      * to a Shell command.
      */
     const [availableViews, setAvailableViews] = useState<Record<string, ToolContent>>({})
+    /**
+     * When the user manually picks `preview` from the dropdown, pin it: don't
+     * let agent tool events steal the panel away. Preview is "the running
+     * app" — far more often than not, the user wants it to stay put while
+     * the agent does its work in the background. Other categories aren't
+     * pinned (the existing "show what the agent is doing" behavior is fine
+     * for browser/file/shell).
+     */
+    const previewPinnedRef = useRef(false)
 
     const showToolPanel = useCallback((content: ToolContent, isLive: boolean = false) => {
       eventBus.emit(EVENT_SHOW_TOOL_PANEL)
       setVisible(true)
-      setToolContent(content)
       setIsShow(true)
-      setLive(isLive)
       setAvailableViews((prev) => {
         // Same reference (or same tool_call_id snapshot) → skip the spread to
         // avoid a no-op rerender of the dropdown's useMemo downstream.
         if (prev[content.name] === content) return prev
         return { ...prev, [content.name]: content }
       })
+      // If user has pinned Preview, agent tool calls update availableViews
+      // (so the dropdown stays informative) but don't swap the active view.
+      if (previewPinnedRef.current && content.name !== 'preview') return
+      setToolContent(content)
+      setLive(isLive)
     }, [])
 
     const hideToolPanel = useCallback(() => setIsShow(false), [])
@@ -74,6 +86,7 @@ const ToolPanel = forwardRef<ToolPanelHandle, Props>(
 
     /** Manual view switch from the dropdown — never live, since the user is navigating history. */
     const switchView = useCallback((content: ToolContent) => {
+      previewPinnedRef.current = content.name === 'preview'
       setToolContent(content)
       setLive(false)
     }, [])

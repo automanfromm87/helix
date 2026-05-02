@@ -39,12 +39,33 @@ import PlanPanel from '@/components/PlanPanel'
 import { ShareIcon } from '@/components/icons'
 import { SimpleBar, type SimpleBarHandle } from '@/components/ui/SimpleBar'
 import ToolPanel, { type ToolPanelHandle } from '@/components/ToolPanel'
+import type { InspectorPayload } from '@/components/toolViews/PreviewToolView'
 import { useFilePanel } from '@/hooks/useFilePanel'
 import { useLeftPanel } from '@/hooks/useLeftPanel'
 import { useSessionFileList } from '@/hooks/useSessionFileList'
 import { copyToClipboard } from '@/utils/dom'
 import { showErrorToast, showSuccessToast } from '@/utils/toast'
 import { cn } from '@/lib/utils'
+
+function inspectorContextBlock(p: InspectorPayload): string {
+  const truncate = (s: string, max = 80) => (s.length > max ? `${s.slice(0, max)}…` : s)
+  const path = p.source?.fileName.replace(/^.*\/project\//, '') ?? null
+  const fileLine = path && p.source ? `${path}:${p.source.lineNumber}` : null
+  const attrs = [p.id && `id="${p.id}"`, p.className && `class="${truncate(p.className)}"`]
+    .filter(Boolean)
+    .join(' ')
+  const element = `<${p.tagName}${attrs ? ` ${attrs}` : ''}>`
+  const lines = ['[Selected element]']
+  if (p.componentName) lines.push(`component: <${p.componentName}>`)
+  if (fileLine) lines.push(`file: ${fileLine}`)
+  lines.push(`element: ${element}`)
+  return lines.join('\n')
+}
+
+function inspectorContextKey(p: InspectorPayload): string {
+  const src = p.source ? `${p.source.fileName}:${p.source.lineNumber}` : ''
+  return `${p.componentName ?? ''}|${src}|${p.tagName}|${p.className}|${p.id}`
+}
 
 export default function ChatPage() {
   const navigate = useNavigate()
@@ -56,6 +77,7 @@ export default function ChatPage() {
   const hideFilePanel = useFilePanel((s) => s.hideFilePanel)
 
   const [inputMessage, setInputMessage] = useState('')
+  const [selectedContexts, setSelectedContexts] = useState<InspectorPayload[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
   const [realTime, setRealTime] = useState(true)
@@ -81,6 +103,7 @@ export default function ChatPage() {
   const lastEventId = useRef<string | undefined>()
   const cancelCurrentChat = useRef<(() => void) | null>(null)
   const toolPanel = useRef<ToolPanelHandle>(null)
+  const initializedSessionRef = useRef<string | undefined>(undefined)
   // Sync flag tracking whether a chat() invocation is already in flight
   // for this session. Set the moment chat() starts, cleared when the SSE
   // stream's onClose / onError fires. The ref is checked at the top of
@@ -129,6 +152,25 @@ export default function ChatPage() {
           (m) =>
             m.type === data.role &&
             (m.content as MessageContent).message_id === data.message_id,
+        )
+        if (idx >= 0) {
+          const next = [...prev]
+          next[idx] = { type: data.role, content: { ...data } as MessageContent } as Message
+          return next
+        }
+      }
+      // The backend occasionally re-emits an event with the same event_id —
+      // restoreSession replay overlapping with live SSE, multi-agent boundary
+      // acks, etc. Treat same (type, event_id) as the same row to avoid
+      // React duplicate-key warnings. event_id "00...000" placeholders are
+      // skipped here so unrelated rows that share the sentinel don't get
+      // collapsed into one.
+      const isPlaceholderId = (id?: string) => !id || /^0+$/.test(id)
+      if (!isPlaceholderId(data.event_id)) {
+        const idx = prev.findIndex(
+          (m) =>
+            m.type === data.role &&
+            (m.content as MessageContent).event_id === data.event_id,
         )
         if (idx >= 0) {
           const next = [...prev]
@@ -309,6 +351,7 @@ export default function ChatPage() {
             setIsLoading(false)
             cancelCurrentChat.current?.()
             cancelCurrentChat.current = null
+            chatInFlightRef.current = false
           }
           break
         default:
@@ -360,6 +403,7 @@ export default function ChatPage() {
       setFollow(true)
       setInputMessage('')
       setAttachments([])
+      setSelectedContexts([])
       setIsLoading(true)
 
       try {
@@ -462,6 +506,7 @@ export default function ChatPage() {
           goal: p.goal,
           status: p.status,
           error: p.error,
+          commit_sha: p.commit_sha ?? null,
           tasks: p.tasks.map((t) => ({
             task_id: t.task_id,
             plan_id: t.plan_id,
@@ -520,8 +565,13 @@ export default function ChatPage() {
     }
   }, [sessionId, handleEvent, chat])
 
-  // Reset on session change.
+  // Reset on session change. StrictMode-safe: bail when re-fired for the
+  // same session, otherwise the second mount would wipe the chatInFlight
+  // / navMessageConsumed guards and chat() would run twice.
   useEffect(() => {
+    if (initializedSessionRef.current === sessionId) return
+    initializedSessionRef.current = sessionId
+
     cancelCurrentChat.current?.()
     cancelCurrentChat.current = null
     // Clear in-flight + nav-consumption flags so the new session starts
@@ -536,6 +586,7 @@ export default function ChatPage() {
     setViewedPlanIndex(0)
     setTitle('New Chat')
     setAttachments([])
+    setSelectedContexts([])
     setShareMode('private')
     setLinkCopied(false)
     setRealTime(true)
@@ -587,6 +638,24 @@ export default function ChatPage() {
       }
     }
   }, [messages, follow])
+
+  // PreviewToolView dispatches `helix:preview:select` when the user
+  // clicks an element in iframe inspect mode. We collect these as chips
+  // above the chat input; on send, the formatted blocks are prepended to
+  // the message so the agent gets the React source context.
+  useEffect(() => {
+    const onSelect = (e: Event) => {
+      const detail = (e as CustomEvent<InspectorPayload>).detail
+      if (!detail) return
+      setSelectedContexts((prev) => {
+        const key = inspectorContextKey(detail)
+        if (prev.some((p) => inspectorContextKey(p) === key)) return prev
+        return [...prev, detail]
+      })
+    }
+    window.addEventListener('helix:preview:select', onSelect)
+    return () => window.removeEventListener('helix:preview:select', onSelect)
+  }, [])
 
   const handleScroll = () => {
     setFollow(simpleBarRef.current?.isScrolledToBottom() ?? false)
@@ -689,13 +758,15 @@ export default function ChatPage() {
     getItemKey: (index) => {
       const m = messages[index]
       const c = m?.content as { event_id?: string; tool_call_id?: string; task_id?: string }
-      // Prefix the natural id with the message type. A single user message
-      // with attachments produces TWO entries (a `user` message + a
-      // sibling `attachments` message) that share the same `event_id` —
-      // without the type prefix React/virtualizer sees a duplicate key
-      // and the tree blanks out.
-      const id = c?.event_id ?? c?.tool_call_id ?? c?.task_id ?? index
-      return `${m?.type ?? 'm'}:${id}`
+      // The chat list is append-only; truncation (edit-and-regenerate)
+      // shifts subsequent indices, which is the *desired* re-key signal so
+      // virtualizer measurements don't carry over to a different message.
+      // Including the index makes the key globally unique even when the
+      // backend re-emits an event_id (replay / multi-agent boundary acks),
+      // while the natural id keeps the key stable for streaming updates
+      // that replace a row in place at the same index.
+      const id = c?.event_id ?? c?.tool_call_id ?? c?.task_id ?? 'x'
+      return `${m?.type ?? 'm'}:${id}:${index}`
     },
   })
 
@@ -975,7 +1046,23 @@ export default function ChatPage() {
               isRunning={isLoading}
               attachments={attachments}
               onAttachmentsChange={setAttachments}
-              onSubmit={() => chat(inputMessage, attachments)}
+              contexts={selectedContexts.map((c) => ({
+                id: inspectorContextKey(c),
+                label: c.componentName ?? `<${c.tagName}>`,
+                detail: c.source
+                  ? `${c.source.fileName.replace(/^.*\/project\//, '')}:${c.source.lineNumber}`
+                  : undefined,
+              }))}
+              onRemoveContext={(id) =>
+                setSelectedContexts((prev) =>
+                  prev.filter((p) => inspectorContextKey(p) !== id),
+                )
+              }
+              onSubmit={() => {
+                const ctx = selectedContexts.map(inspectorContextBlock).join('\n\n')
+                const merged = ctx ? `${ctx}\n\n${inputMessage}`.trim() : inputMessage
+                void chat(merged, attachments)
+              }}
               onStop={handleStop}
             />
           </div>

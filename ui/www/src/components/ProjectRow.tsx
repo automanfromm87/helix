@@ -1,5 +1,5 @@
-import { useState, type MouseEvent } from 'react'
-import { Ellipsis, Pencil, Sparkles, Trash } from 'lucide-react'
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
+import { Check, Ellipsis, Pencil, Trash } from 'lucide-react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import {
@@ -17,11 +17,7 @@ import {
   useContextMenu,
 } from '@/hooks/useContextMenu'
 import { useDialog } from '@/hooks/useDialog'
-import {
-  deleteProject,
-  renameProject,
-  updateProjectSystemPrompt,
-} from '@/api/projects'
+import { deleteProject, renameProject } from '@/api/projects'
 import { showErrorToast, showSuccessToast } from '@/utils/toast'
 import { cn } from '@/lib/utils'
 
@@ -29,7 +25,10 @@ interface Props {
   project: ProjectItem
   onDeleted: (projectId: string) => void
   onRenamed: (projectId: string, name: string) => void
-  onPromptChanged: (projectId: string, prompt: string | null) => void
+  /** When true, clicking the row toggles selection instead of navigating. */
+  mergeMode?: boolean
+  isSelected?: boolean
+  onToggleSelected?: (sessionId: string) => void
 }
 
 /** A single sidebar row — one project = one chat. */
@@ -37,53 +36,73 @@ export default function ProjectRow({
   project,
   onDeleted,
   onRenamed,
-  onPromptChanged,
+  mergeMode = false,
+  isSelected = false,
+  onToggleSelected,
 }: Props) {
   const navigate = useNavigate()
   const params = useParams<{ sessionId?: string }>()
   const showContextMenu = useContextMenu((s) => s.show)
   const showConfirmDialog = useDialog((s) => s.showConfirmDialog)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [promptOpen, setPromptOpen] = useState(false)
-  const [promptDraft, setPromptDraft] = useState('')
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renaming, setRenaming] = useState(false)
+  const renameInputRef = useRef<HTMLInputElement>(null)
 
   const sessionId = project.session_id
   const isCurrent = !!sessionId && params.sessionId === sessionId
 
   const handleClick = () => {
+    if (mergeMode) {
+      if (sessionId) onToggleSelected?.(sessionId)
+      return
+    }
     if (sessionId) navigate(`/chat/${sessionId}`)
   }
 
-  const openPromptDialog = () => {
-    setPromptDraft(project.system_prompt ?? '')
-    setPromptOpen(true)
+  const openRenameDialog = () => {
+    setRenameDraft(project.name)
+    setRenameOpen(true)
   }
 
-  const savePrompt = async () => {
-    const trimmed = promptDraft.trim()
-    const next = trimmed === '' ? null : trimmed
-    if (next === (project.system_prompt ?? null)) {
-      setPromptOpen(false)
+  // Auto-focus + select-all on open so the user can just type the new name.
+  useEffect(() => {
+    if (renameOpen) {
+      // setTimeout because the dialog mount + focus race otherwise misses.
+      const t = window.setTimeout(() => {
+        renameInputRef.current?.focus()
+        renameInputRef.current?.select()
+      }, 0)
+      return () => window.clearTimeout(t)
+    }
+  }, [renameOpen])
+
+  const submitRename = async () => {
+    const next = renameDraft.trim()
+    if (!next || next === project.name) {
+      setRenameOpen(false)
       return
     }
-    try {
-      await updateProjectSystemPrompt(project.project_id, next)
-      onPromptChanged(project.project_id, next)
-      setPromptOpen(false)
-      showSuccessToast('Prompt updated')
-    } catch {
-      showErrorToast('Failed to update prompt')
-    }
-  }
-
-  const handleRename = async () => {
-    const next = window.prompt('Project name', project.name)
-    if (!next || next === project.name) return
+    setRenaming(true)
     try {
       await renameProject(project.project_id, next)
       onRenamed(project.project_id, next)
+      setRenameOpen(false)
+      showSuccessToast('Renamed')
     } catch {
       showErrorToast('Failed to rename project')
+    } finally {
+      setRenaming(false)
+    }
+  }
+
+  const onRenameKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      void submitRename()
+    } else if (e.key === 'Escape') {
+      setRenameOpen(false)
     }
   }
 
@@ -116,12 +135,10 @@ export default function ProjectRow({
       target,
       [
         createMenuItem('rename', 'Rename', { icon: Pencil }),
-        createMenuItem('prompt', 'Edit prompt', { icon: Sparkles }),
         createDangerMenuItem('delete', 'Delete', { icon: Trash }),
       ],
       (itemKey) => {
-        if (itemKey === 'rename') void handleRename()
-        else if (itemKey === 'prompt') openPromptDialog()
+        if (itemKey === 'rename') openRenameDialog()
         else if (itemKey === 'delete') handleDelete()
       },
       () => setMenuOpen(false),
@@ -139,14 +156,32 @@ export default function ProjectRow({
       <div
         onClick={handleClick}
         className={cn(
-          'group flex items-center rounded-[10px] cursor-pointer transition-colors w-full gap-[12px] h-[36px] flex-shrink-0 ps-[9px] pe-[2px] active:bg-[var(--fill-tsp-white-dark)]',
+          'group relative flex items-center rounded-[10px] cursor-pointer transition-colors w-full gap-[12px] h-[36px] flex-shrink-0 ps-[9px] pe-[2px] active:bg-[var(--fill-tsp-white-dark)]',
           isCurrent
             ? 'bg-[var(--fill-tsp-white-main)]'
             : 'hover:bg-[var(--fill-tsp-white-light)]',
         )}
       >
+        <span
+          className={cn(
+            'absolute left-0 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-r-full bg-[var(--text-brand)] transition-opacity',
+            isCurrent ? 'opacity-100' : 'opacity-0',
+          )}
+          aria-hidden
+        />
         <div className="shrink-0 size-[18px] flex items-center justify-center relative">
-          {isBusy ? (
+          {mergeMode ? (
+            <div
+              className={cn(
+                'size-[16px] rounded-[4px] border inline-flex items-center justify-center transition-colors',
+                isSelected
+                  ? 'bg-[var(--text-brand)] border-[var(--text-brand)] text-white'
+                  : 'border-[var(--border-main)] bg-transparent',
+              )}
+            >
+              {isSelected && <Check size={11} strokeWidth={3} />}
+            </div>
+          ) : isBusy ? (
             <div
               className="border rounded-full animate-spin"
               style={{
@@ -162,7 +197,7 @@ export default function ProjectRow({
               <circle cx="8" cy="8" r="6.5" stroke="var(--function-warning)" strokeDasharray="2.44 1.62" strokeWidth="1.5" />
             </svg>
           ) : (
-            <div className="size-[18px] rounded-full bg-[var(--fill-tsp-white-dark)]" />
+            <div className="size-[6px] rounded-full bg-[var(--icon-tertiary)] opacity-60" />
           )}
         </div>
         <div className="flex-1 min-w-0 flex gap-[4px] items-center text-[14px] text-[var(--text-primary)]">
@@ -183,34 +218,40 @@ export default function ProjectRow({
         </div>
       </div>
 
-      <Dialog open={promptOpen} onOpenChange={setPromptOpen}>
-        <DialogContent className="max-w-xl">
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Project prompt — {project.name}</DialogTitle>
+            <DialogTitle>Rename project</DialogTitle>
           </DialogHeader>
-          <div className="text-xs text-[var(--text-tertiary)] mb-2">
-            Appended to the agent's built-in instructions for this project's
-            chat. Existing chats keep the prompt that was active when they were
-            created.
-          </div>
-          <textarea
-            value={promptDraft}
-            onChange={(e) => setPromptDraft(e.target.value)}
-            placeholder="e.g. You are a helpful research assistant focused on internal docs."
-            className="w-full min-h-[160px] rounded-md border border-[var(--border-main)] bg-transparent p-3 text-sm outline-none focus:ring-2 focus:ring-[var(--text-brand)] resize-y"
+          <input
+            ref={renameInputRef}
+            type="text"
+            value={renameDraft}
+            onChange={(e) => setRenameDraft(e.target.value)}
+            onKeyDown={onRenameKey}
+            placeholder="Project name"
+            className="w-full h-10 rounded-md border border-[var(--border-main)] bg-transparent px-3 text-sm outline-none focus:ring-2 focus:ring-[var(--text-brand)]"
           />
           <DialogFooter className="gap-2">
             <button
-              onClick={() => setPromptOpen(false)}
-              className="px-3 h-9 rounded-md border border-[var(--border-btn-main)] text-sm hover:bg-[var(--fill-tsp-white-light)]"
+              type="button"
+              onClick={() => setRenameOpen(false)}
+              disabled={renaming}
+              className="px-3 h-9 rounded-md border border-[var(--border-btn-main)] text-sm hover:bg-[var(--fill-tsp-white-light)] disabled:opacity-50"
             >
               Cancel
             </button>
             <button
-              onClick={savePrompt}
-              className="px-3 h-9 rounded-md text-sm bg-[var(--Button-primary-black)] text-[var(--text-onblack)] hover:opacity-90"
+              type="button"
+              onClick={submitRename}
+              disabled={
+                renaming ||
+                !renameDraft.trim() ||
+                renameDraft.trim() === project.name
+              }
+              className="px-3 h-9 rounded-md text-sm bg-[var(--Button-primary-black)] text-[var(--text-onblack)] hover:opacity-90 disabled:opacity-50"
             >
-              Save
+              {renaming ? 'Saving…' : 'Save'}
             </button>
           </DialogFooter>
         </DialogContent>

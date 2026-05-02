@@ -58,6 +58,18 @@ class ProjectService:
 
     async def rename_project(self, project_id: str, user_id: str, name: str) -> None:
         await self._project_repository.update_name(project_id, user_id, name)
+        # 1:1 model: the sidebar label is `session.title || project.name`,
+        # which lets auto-derived session titles ("Build a todo app")
+        # win over the generic default project name. But once the user
+        # explicitly renames, *they* should win — so push the new label
+        # onto the underlying session(s) too. No-op if the project has
+        # no sessions yet.
+        if self._session_repository is not None:
+            pairs = await self._session_repository.find_ids_and_sandbox_by_project_id(
+                project_id, user_id,
+            )
+            for session_id, _sandbox_id in pairs:
+                await self._session_repository.update_title(session_id, name)
 
     async def update_system_prompt(
         self, project_id: str, user_id: str, system_prompt: Optional[str]

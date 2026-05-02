@@ -134,6 +134,13 @@ class SessionRepository(Protocol):
         via CASCADE). Returns rows deleted."""
         ...
 
+    async def find_ids_and_sandbox_by_project_id(
+        self, project_id: str, user_id: str
+    ) -> list[tuple[str, Optional[str]]]:
+        """List (session_id, sandbox_id) pairs for a project's sessions.
+        Used by cleanup before bulk DB delete."""
+        ...
+
     async def list_in_flight_sessions(self) -> list[tuple[str, str]]:
         """Return (session_id, agent_id) pairs for sessions that were
         PENDING/RUNNING when the previous backend process died.

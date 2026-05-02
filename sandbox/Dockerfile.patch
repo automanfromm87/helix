@@ -1,0 +1,18 @@
+# Incremental patch on top of the existing helix-sandbox image. The
+# upstream chromium PPA is currently flaky, so a from-scratch build
+# fails at the chromium apt step — this skips that by FROM'ing the
+# already-built image and only layering on the new bits (pnpm + the
+# helix-dev-runner + the updated supervisord.conf).
+FROM helix-sandbox:latest
+
+# Install pnpm — used by helix-dev-runner.sh to bring up Vite dev
+# servers. Global install so it lives outside any per-project node_modules.
+RUN npm install -g pnpm@9 && pnpm config set registry https://registry.npmmirror.com
+
+# Drop in the runner script as a real binary in PATH.
+COPY helix-dev-runner.sh /usr/local/bin/helix-dev-runner.sh
+RUN chmod +x /usr/local/bin/helix-dev-runner.sh
+
+# Updated supervisord.conf adds [program:dev_server]. CMD points at
+# /app/supervisord.conf (see base image), so overwrite there.
+COPY supervisord.conf /app/supervisord.conf

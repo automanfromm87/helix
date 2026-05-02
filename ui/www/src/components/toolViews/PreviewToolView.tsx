@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ExternalLink, RefreshCw } from 'lucide-react'
+import { ExternalLink, MousePointerClick, RefreshCw } from 'lucide-react'
 
 import { apiClient, type ApiResponse } from '@/api/client'
 import type { ToolViewProps } from '@/constants/tool'
+import { cn } from '@/lib/utils'
 
 /**
  * Live preview of the sandbox dev server, iframed straight from
@@ -21,17 +22,31 @@ import type { ToolViewProps } from '@/constants/tool'
  * has to run `npm run dev -- --host 0.0.0.0` first. While that's
  * pending the iframe shows the browser's default "couldn't connect"
  * page; the Refresh button is one tap away.
+ *
+ * Inspect mode: parent posts `{source:'helix-parent', type:'inspect:on'}`
+ * to the iframe. The user's app must include `src/helix-inspector.ts`
+ * (scaffolded by the react-vite-typescript skill); on click it posts
+ * back `{source:'helix-inspector', type:'select', payload}`. We turn
+ * that into a `helix:preview:select` window event for ChatPage to
+ * append to the chat input.
  */
+export interface InspectorPayload {
+  componentName: string | null
+  source: { fileName: string; lineNumber: number; columnNumber?: number } | null
+  tagName: string
+  className: string
+  id: string
+  textContent: string
+}
+
 export default function PreviewToolView({ sessionId }: ToolViewProps) {
   const [url, setUrl] = useState<string | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
-  // Bumped on Refresh to force the iframe to reload — appended as a
-  // cache-buster query param so dev-server SPAs don't serve stale HTML.
   const [reloadKey, setReloadKey] = useState(0)
   const [fetching, setFetching] = useState(false)
-  // Track whether we've already auto-refetched after a load error this
-  // mount, so we don't spin (the error event can fire multiple times).
+  const [inspecting, setInspecting] = useState(false)
   const autoRefetchedRef = useRef(false)
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
 
   const fetchUrl = useCallback(async () => {
     setFetching(true)
@@ -55,22 +70,40 @@ export default function PreviewToolView({ sessionId }: ToolViewProps) {
     void fetchUrl()
   }, [fetchUrl])
 
-  // Refresh: re-fetch the preview URL AND bump the iframe reload key.
-  // The URL re-fetch handles the case where the sandbox got replaced
-  // (backend restart / TTL eviction) — its host port changes between
-  // sandbox lifetimes, so just reloading the old URL would still hit
-  // a dead port. We always re-fetch first, then bump the key after the
-  // URL state lands.
+  // Auto-poll while the dev server is warming up. After fork or initial
+  // sandbox creation, the supervisord-managed dev_server runs `pnpm
+  // install` first (no node_modules in the bind mount), which takes
+  // 30-90s on a cold cache. During that window `getPreviewUrl` returns
+  // null because the HEAD probe fails; without a poll the user sees a
+  // permanent "No preview yet" and assumes fork failed.
+  //
+  // Poll every 3s for up to ~3min after mount as long as URL is still
+  // null. Stop the moment we get a URL — subsequent re-fetches go
+  // through the manual Refresh button or iframe error path.
+  useEffect(() => {
+    if (url) return  // already up
+    let cancelled = false
+    let attempts = 0
+    const id = window.setInterval(() => {
+      attempts++
+      if (cancelled || attempts > 60) {
+        window.clearInterval(id)
+        return
+      }
+      void fetchUrl()
+    }, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [url, fetchUrl])
+
   const refresh = useCallback(async () => {
     autoRefetchedRef.current = false
     await fetchUrl()
     setReloadKey((k) => k + 1)
   }, [fetchUrl])
 
-  // When the iframe fails to load (e.g. dev server not yet up, port
-  // changed after sandbox replacement), do ONE silent re-fetch of the
-  // URL. If the new URL works the iframe reloads on the next render;
-  // if it still fails, surface the manual Refresh banner.
   const handleIframeError = useCallback(() => {
     setLoadFailed(true)
     if (!autoRefetchedRef.current) {
@@ -79,18 +112,80 @@ export default function PreviewToolView({ sessionId }: ToolViewProps) {
     }
   }, [fetchUrl])
 
+  const postToIframe = useCallback((msg: Record<string, unknown>) => {
+    iframeRef.current?.contentWindow?.postMessage({ source: 'helix-parent', ...msg }, '*')
+  }, [])
+
+  const toggleInspect = useCallback(() => {
+    setInspecting((prev) => {
+      const next = !prev
+      postToIframe({ type: next ? 'inspect:on' : 'inspect:off' })
+      return next
+    })
+  }, [postToIframe])
+
+  // Receive messages from the inspector helper running inside the iframe.
+  // Wide listener (any origin) is fine — we filter strictly on the
+  // {source:'helix-inspector'} marker plus message shape.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      const d = e.data
+      if (!d || d.source !== 'helix-inspector') return
+      if (d.type === 'select') {
+        const detail = d.payload as InspectorPayload
+        window.dispatchEvent(new CustomEvent('helix:preview:select', { detail }))
+        setInspecting(false)
+      } else if (d.type === 'cancel') {
+        setInspecting(false)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
   const iframeSrc = url ? `${url}?_helix_r=${reloadKey}` : ''
 
   return (
     <div className="flex flex-col h-full w-full">
       <div className="h-[36px] flex items-center gap-2 px-3 w-full bg-[var(--background-gray-main)] border-b border-[var(--border-main)] rounded-t-[12px] shadow-[inset_0px_1px_0px_0px_#FFFFFF] dark:shadow-[inset_0px_1px_0px_0px_#FFFFFF30] flex-shrink-0">
-        <div className="flex-1 flex items-center min-w-0">
-          <div className="text-[var(--text-tertiary)] text-sm font-medium truncate font-mono">
-            {url || (fetching ? 'Loading preview…' : 'No preview available')}
+        <div className="flex-1 flex items-center gap-2 min-w-0">
+          <span
+            className={cn(
+              'w-2 h-2 rounded-full flex-shrink-0',
+              loadFailed
+                ? 'bg-[var(--function-error)]'
+                : url
+                  ? 'bg-[var(--function-success)]'
+                  : 'bg-[var(--icon-tertiary)]',
+            )}
+            aria-hidden
+          />
+          <div
+            className="text-[var(--text-secondary)] text-sm font-medium truncate"
+            title={url ?? undefined}
+          >
+            {url
+              ? loadFailed
+                ? 'Connection failed'
+                : 'Sandbox running'
+              : 'Setting up dev server…'}
           </div>
         </div>
         {url && (
           <>
+            <button
+              type="button"
+              onClick={toggleInspect}
+              title={inspecting ? 'Exit inspect mode' : 'Inspect element (writes source info to chat)'}
+              className={cn(
+                'h-6 w-6 inline-flex items-center justify-center rounded-md',
+                inspecting
+                  ? 'bg-[var(--text-brand)] text-white'
+                  : 'hover:bg-[var(--fill-tsp-white-light)] text-[var(--icon-secondary)]',
+              )}
+            >
+              <MousePointerClick size={14} />
+            </button>
             <button
               type="button"
               onClick={refresh}
@@ -115,22 +210,27 @@ export default function PreviewToolView({ sessionId }: ToolViewProps) {
         {url ? (
           <iframe
             key={reloadKey}
+            ref={iframeRef}
             src={iframeSrc}
             title="Sandbox preview"
             className="absolute inset-0 w-full h-full border-0"
-            // `allow-*` opens the gate for normal SPA features (forms,
-            // popups for OAuth flows, clipboard for copy buttons).
-            // `allow-same-origin` is required for many React dev-tools.
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-clipboard-read allow-clipboard-write allow-modals"
+            // `sandbox` flags gate iframe security (forms, popups for OAuth,
+            // same-origin for React dev tools). Clipboard isn't a sandbox
+            // flag — it's a Permissions Policy on `allow=`, hence the split.
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+            allow="clipboard-read; clipboard-write"
             onLoad={() => setLoadFailed(false)}
             onError={handleIframeError}
           />
         ) : (
-          <div className="h-full flex items-center justify-center px-6 text-center">
-            <div className="text-[var(--text-tertiary)] text-sm">
-              {fetching
-                ? 'Resolving preview URL…'
-                : 'No preview port has been allocated for this session yet. Send a message to provision the sandbox.'}
+          <div className="h-full flex flex-col items-center justify-center px-6 text-center gap-3">
+            <div className="size-3 rounded-full bg-[var(--icon-tertiary)] opacity-60 animate-pulse" />
+            <div className="text-[var(--text-secondary)] text-sm font-medium">
+              Setting up dev server…
+            </div>
+            <div className="text-[var(--text-tertiary)] text-xs max-w-[320px] leading-snug">
+              Installing dependencies and starting Vite. Usually 30-60 seconds
+              on first launch; the iframe will fill in automatically.
             </div>
           </div>
         )}

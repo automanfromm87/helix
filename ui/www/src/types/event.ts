@@ -91,5 +91,6 @@ export interface PlanEventData extends BaseEventData {
   goal: string
   status: PlanStatusValue
   error?: string | null
+  commit_sha?: string | null
   tasks: TaskEventData[]
 }

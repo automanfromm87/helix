@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from sse_starlette.sse import EventSourceResponse
 from typing import AsyncGenerator, List, Optional
 from sse_starlette.event import ServerSentEvent
@@ -147,6 +147,28 @@ async def delete_session(
 ) -> APIResponse[None]:
     await agent_service.delete_session(session_id, current_user.id)
     return APIResponse.success()
+
+@router.post("/{session_a_id}/merge-with/{session_b_id}")
+async def merge_two_sessions(
+    session_a_id: str,
+    session_b_id: str,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+):
+    """Merge one session's branch into another. Direction is inferred
+    from the branches (the one on `fork/*` is the source). On clean
+    merge or LLM-resolved merge, a new tagged plan version lands in
+    the target session."""
+    try:
+        result = await agent_service.merge_two_sessions(
+            session_a_id, session_b_id, current_user.id,
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return APIResponse.success(result)
+
 
 @router.post("/{session_id}/stop", response_model=APIResponse[None])
 async def stop_session(

@@ -222,6 +222,10 @@ class PlanRow(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Set when the plan completes successfully and the auto-commit lands.
+    # NULL for plans that produced no file changes, plans that pre-date
+    # the versioning feature, or runs where git unexpectedly errored out.
+    commit_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
 
     tasks: Mapped[list["TaskRow"]] = relationship(
         back_populates="plan",

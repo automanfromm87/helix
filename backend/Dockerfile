@@ -2,8 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install curl
-RUN apt-get update && apt-get install -y curl
+# Install curl + git (git is used for plan-versioning: each completed plan
+# becomes a tagged commit on the project's host bind mount).
+RUN apt-get update && apt-get install -y curl git
 
 # Install nodejs
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \

@@ -92,6 +92,7 @@ def _plan_row_to_domain(row: PlanRow) -> Plan:
         created_at=row.created_at,
         updated_at=row.updated_at,
         completed_at=row.completed_at,
+        commit_sha=row.commit_sha,
     )
 
 
@@ -181,6 +182,15 @@ class SqlPlanRepository(PlanRepository):
             )
             if result.rowcount == 0:
                 raise NotFoundError(f"Plan {plan_id} not found")
+            await db.commit()
+
+    async def set_commit_sha(self, plan_id: str, commit_sha: str) -> None:
+        async with self._session_factory() as db:
+            await db.execute(
+                update(PlanRow)
+                .where(PlanRow.plan_id == plan_id)
+                .values(commit_sha=commit_sha)
+            )
             await db.commit()
 
     async def find_task(self, task_id: str) -> Optional[Task]:

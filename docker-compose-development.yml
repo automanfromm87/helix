@@ -38,6 +38,12 @@ services:
       # Docker socket is RW so the backend can spawn per-session sandbox
       # containers via the docker SDK. (`:ro` would block create/start.)
       - /var/run/docker.sock:/var/run/docker.sock
+      # Mirror the sandbox project bind-mount root into the backend so
+      # plan-versioning can run `git` directly against the session's
+      # project dir from the host's perspective. Uses the same host path
+      # the sandbox container sees, keeping `settings.sandbox_data_host_root`
+      # the single source of truth.
+      - /tmp/helix-sandboxes:/tmp/helix-sandboxes
       - /app/__pycache__  # Avoid overwriting cache files
       - /app/.venv  # Avoid overwriting virtual environment
     ports:

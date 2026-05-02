@@ -25,6 +25,7 @@ class PlanItem(BaseModel):
     status: PlanStatus
     error: Optional[str] = None
     tasks: List[TaskItem]
+    commit_sha: Optional[str] = None
 
 
 class ListPlansResponse(BaseModel):
@@ -33,3 +34,19 @@ class ListPlansResponse(BaseModel):
 
 class GetPlanResponse(BaseModel):
     plan: Optional[PlanItem] = None
+
+
+class PlanDiffResponse(BaseModel):
+    plan_id: str
+    commit_sha: Optional[str] = None
+    diff: str = ""
+
+
+class PlanRestoreResponse(BaseModel):
+    plan_id: str
+    restored: bool
+
+
+class PlanForkResponse(BaseModel):
+    plan_id: str
+    new_session_id: str

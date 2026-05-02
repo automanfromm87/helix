@@ -7,12 +7,18 @@ import {
   useState,
   type KeyboardEvent,
 } from 'react'
-import { Paperclip } from 'lucide-react'
+import { MousePointerClick, Paperclip, X } from 'lucide-react'
 
 import type { FileInfo } from '@/api/file'
 import { SendIcon } from '@/components/icons'
 import ChatBoxFiles, { type ChatBoxFilesHandle } from './ChatBoxFiles'
 import { cn } from '@/lib/utils'
+
+export interface InputContextChip {
+  id: string
+  label: string
+  detail?: string
+}
 
 interface Props {
   value: string
@@ -21,6 +27,8 @@ interface Props {
   isRunning: boolean
   attachments: FileInfo[]
   onAttachmentsChange?: (files: FileInfo[]) => void
+  contexts?: InputContextChip[]
+  onRemoveContext?: (id: string) => void
   onSubmit: () => void
   onStop?: () => void
   hideStopButton?: boolean
@@ -41,6 +49,8 @@ const ChatBox = forwardRef<ChatBoxHandle, Props>(
       isRunning,
       attachments,
       onAttachmentsChange,
+      contexts,
+      onRemoveContext,
       onSubmit,
       onStop,
       hideStopButton,
@@ -51,13 +61,14 @@ const ChatBox = forwardRef<ChatBoxHandle, Props>(
     const [isComposing, setIsComposing] = useState(false)
     const filesRef = useRef<ChatBoxFilesHandle>(null)
     const hasTextInput = value.trim() !== ''
+    const hasContext = (contexts?.length ?? 0) > 0
 
     const sendEnabled = useMemo(() => {
       const hasFiles = (attachments?.length ?? 0) > 0
       const allUploaded = filesRef.current?.isAllUploaded() ?? true
-      if (allowSendFilesOnly) return hasTextInput || (hasFiles && allUploaded)
-      return hasTextInput && (!hasFiles || allUploaded)
-    }, [hasTextInput, attachments, allowSendFilesOnly])
+      if (allowSendFilesOnly) return hasTextInput || hasContext || (hasFiles && allUploaded)
+      return (hasTextInput || hasContext) && (!hasFiles || allUploaded)
+    }, [hasTextInput, hasContext, attachments, allowSendFilesOnly])
 
     useImperativeHandle(ref, () => ({
       uploadFile: () => filesRef.current?.uploadFile(),
@@ -83,6 +94,35 @@ const ChatBox = forwardRef<ChatBoxHandle, Props>(
     return (
       <div className="pb-3 relative bg-[var(--background-gray-main)]">
         <div className="flex flex-col gap-3 rounded-[22px] transition-all relative bg-[var(--fill-input-chat)] py-3 max-h-[300px] shadow-[0px_12px_32px_0px_rgba(0,0,0,0.02)] border border-black/8 dark:border-[var(--border-main)]">
+          {hasContext && (
+            <div className="flex flex-wrap gap-1.5 px-3 -mb-1">
+              {contexts!.map((c) => (
+                <span
+                  key={c.id}
+                  className="group inline-flex items-center gap-1 max-w-full pl-1.5 pr-1 h-6 rounded-md bg-[var(--fill-tsp-white-dark)] border border-[var(--border-light)] text-[12px] text-[var(--text-secondary)]"
+                  title={c.detail ? `${c.label} · ${c.detail}` : c.label}
+                >
+                  <MousePointerClick size={11} className="text-[var(--text-brand)] flex-shrink-0" />
+                  <span className="font-medium truncate max-w-[120px]">{c.label}</span>
+                  {c.detail && (
+                    <span className="font-mono text-[var(--text-tertiary)] truncate max-w-[180px]">
+                      {c.detail}
+                    </span>
+                  )}
+                  {onRemoveContext && (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveContext(c.id)}
+                      className="ml-0.5 w-4 h-4 inline-flex items-center justify-center rounded-sm text-[var(--icon-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-tsp-white-light)]"
+                      aria-label={`Remove ${c.label}`}
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
           <ChatBoxFiles
             ref={filesRef}
             attachments={attachments}

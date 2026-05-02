@@ -39,3 +39,69 @@ html {
 .ltr\:border-l {
   border-left-width: 1px;
 }
+
+/* Fenced code blocks rendered by Markdown.tsx. The renderer wraps each
+ * <pre><code> in a `.helix-code` container with a header strip showing the
+ * language and a hover-to-show Copy button — closer to GitHub / Linear /
+ * the in-house design tooling than plain prose <pre>. */
+.helix-code {
+  position: relative;
+  margin: 0.75em 0;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  background: var(--fill-tsp-white-light);
+}
+.helix-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  font-size: 11px;
+  line-height: 16px;
+  background: var(--fill-tsp-gray-main);
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+}
+.helix-code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  font: inherit;
+  opacity: 0;
+  transition: opacity 100ms ease, background 100ms ease, color 100ms ease;
+}
+.helix-code:hover .helix-code-copy,
+.helix-code-copy:focus-visible {
+  opacity: 1;
+}
+.helix-code-copy:hover {
+  background: var(--fill-tsp-white-dark);
+  color: var(--text-secondary);
+}
+.helix-code-copy[data-state='copied'] {
+  opacity: 1;
+  color: var(--function-success);
+}
+.helix-code pre {
+  margin: 0;
+  padding: 10px 12px;
+  background: transparent !important;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.helix-code code {
+  background: transparent !important;
+  padding: 0 !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

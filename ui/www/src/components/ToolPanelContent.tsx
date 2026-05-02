@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, ChevronDown, Minimize2, Play } from 'lucide-react'
+import { ChevronDown, Minimize2, Play } from 'lucide-react'
 
 import { useToolInfo } from '@/hooks/useTool'
 import type { ToolContent } from '@/types/message'
@@ -29,45 +29,6 @@ interface Props {
 // has a dev server. Browser (VNC) follows for the agent's headless
 // chrome view. The rest are the agent's working tools.
 const VIEW_ORDER: ReadonlyArray<string> = ['preview', 'browser', 'file', 'shell', 'search', 'mcp']
-
-
-/**
- * Pick a one-liner subtitle for a category in the view-switcher dropdown.
- *
- * The previous implementation was `Object.values(item.args).find(string)`,
- * which on Terminal picked the shell session id (`main`) — meaningless to
- * the user — and on Browser would grab the first stringy arg, often a
- * blob of JS instead of the URL. Per-category cherry-pick is short and
- * dramatically more useful.
- */
-function pickSubtitle(category: string, item: ToolContent): string | undefined {
-  const args = (item.args ?? {}) as Record<string, unknown>
-  const pick = (...keys: string[]): string | undefined => {
-    for (const k of keys) {
-      const v = args[k]
-      if (typeof v === 'string' && v.trim()) return v.trim()
-    }
-    return undefined
-  }
-  switch (category) {
-    case 'browser':
-      // browser_navigate has `url`; browser_console_exec has `javascript`;
-      // others fall back to the function description.
-      return pick('url', 'javascript')
-    case 'file':
-      return pick('file', 'path')
-    case 'shell':
-      // shell_exec has `command`; shell_view has `id` (less useful but
-      // still informative when the user hasn't run anything yet).
-      return pick('command', 'input', 'id')
-    case 'search':
-      return pick('query', 'q')
-    case 'mcp':
-      return pick('tool', 'name')
-    default:
-      return undefined
-  }
-}
 
 export default function ToolPanelContent({
   sessionId,
@@ -120,8 +81,8 @@ export default function ToolPanelContent({
                   />
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="start" sideOffset={6}>
-                <div className="w-[300px] max-w-[calc(100vw-32px)] rounded-xl border border-[var(--border-light)] bg-[var(--background-menu-white)] shadow-[0px_8px_32px_0px_var(--shadow-S)] p-1">
+              <PopoverContent align="start" sideOffset={8}>
+                <div className="w-[340px] max-w-[calc(100vw-32px)] rounded-xl border border-[var(--border-light)] bg-[var(--background-menu-white)] shadow-[0px_8px_32px_0px_var(--shadow-S)] p-1.5">
                   {dropdownOptions.map((category) => {
                     const item =
                       availableViews[category] ??
@@ -141,7 +102,6 @@ export default function ToolPanelContent({
                       } as ToolContent)
                     const ItemIcon = TOOL_ICON_MAP[category]
                     const isSelected = category === currentCategory
-                    const subtitle = pickSubtitle(category, item)
                     return (
                       <button
                         key={category}
@@ -150,16 +110,14 @@ export default function ToolPanelContent({
                           setOpen(false)
                         }}
                         className={cn(
-                          'group relative w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-left transition-colors',
+                          'relative w-full h-10 flex items-center gap-3 pl-3 pr-2.5 rounded-lg text-left transition-colors',
                           'hover:bg-[var(--fill-tsp-white-main)]',
                           isSelected && 'bg-[var(--fill-tsp-white-light)]',
                         )}
                       >
-                        {/* Selection accent — single rounded bar on the left,
-                         * cleaner than the previous full-bg highlight. */}
                         <span
                           className={cn(
-                            'absolute left-0 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-r-full transition-opacity',
+                            'absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full transition-opacity',
                             isSelected
                               ? 'bg-[var(--text-brand)] opacity-100'
                               : 'opacity-0',
@@ -177,36 +135,14 @@ export default function ToolPanelContent({
                             )}
                           />
                         ) : null}
-                        <div className="flex-1 min-w-0">
-                          <div
-                            className={cn(
-                              'text-[13px] leading-tight',
-                              isSelected
-                                ? 'font-semibold text-[var(--text-primary)]'
-                                : 'font-medium text-[var(--text-primary)]',
-                            )}
-                          >
-                            {TOOL_NAME_MAP[category] ?? category}
-                          </div>
-                          {subtitle && (
-                            <div
-                              className="text-[11px] mt-[1px] text-[var(--text-tertiary)] truncate font-mono"
-                              title={subtitle}
-                              dir="rtl"
-                            >
-                              {/* dir=rtl flips the truncation to the head so
-                               * a long path like /home/.../components/foo.tsx
-                               * shows the meaningful tail instead of "/home/u…". */}
-                              <bdi>{subtitle}</bdi>
-                            </div>
+                        <div
+                          className={cn(
+                            'flex-1 min-w-0 text-[13px] text-[var(--text-primary)]',
+                            isSelected ? 'font-semibold' : 'font-medium',
                           )}
+                        >
+                          {TOOL_NAME_MAP[category] ?? category}
                         </div>
-                        {isSelected && (
-                          <Check
-                            size={14}
-                            className="text-[var(--text-brand)] flex-shrink-0"
-                          />
-                        )}
                       </button>
                     )
                   })}
@@ -226,24 +162,37 @@ export default function ToolPanelContent({
           </button>
         </div>
         {toolInfo && (
-          <div className="flex items-center gap-2 mt-2">
-            <div className="w-[40px] h-[40px] bg-[var(--fill-tsp-gray-main)] rounded-lg flex items-center justify-center flex-shrink-0">
-              {Icon ? <Icon size={28} /> : null}
-            </div>
-            <div className="flex-1 flex flex-col gap-1 min-w-0">
-              <div className="text-[12px] text-[var(--text-tertiary)]">
-                Helix is using <span className="text-[var(--text-secondary)]">{toolInfo.name}</span>
-              </div>
-              <div
+          <div className="flex items-center gap-2 mt-2 min-w-0">
+            <span
+              className={cn(
+                'w-2 h-2 rounded-full flex-shrink-0',
+                live
+                  ? 'bg-[var(--text-brand)] animate-pulse'
+                  : 'bg-[var(--icon-tertiary)]',
+              )}
+              aria-hidden
+            />
+            <span className="text-[12px] text-[var(--text-tertiary)] flex-shrink-0">
+              Using
+            </span>
+            <span className="text-[12px] font-medium text-[var(--text-secondary)] flex-shrink-0">
+              {toolInfo.name}
+            </span>
+            {(toolInfo.function || toolInfo.functionArg) && (
+              <span
                 title={`${toolInfo.function} ${toolInfo.functionArg}`}
-                className="max-w-[100%] w-[max-content] truncate text-[13px] rounded-full inline-flex items-center px-[10px] py-[3px] border border-[var(--border-light)] bg-[var(--fill-tsp-gray-main)] text-[var(--text-secondary)]"
+                className="min-w-0 max-w-full truncate inline-flex items-center px-2 py-[2px] rounded-md border border-[var(--border-light)] bg-[var(--fill-tsp-gray-main)] text-[12px] text-[var(--text-secondary)]"
               >
-                {toolInfo.function}
-                <span className="flex-1 min-w-0 px-1 ml-1 text-[12px] font-mono max-w-full text-ellipsis overflow-hidden whitespace-nowrap text-[var(--text-tertiary)]">
-                  <code>{toolInfo.functionArg}</code>
-                </span>
-              </div>
-            </div>
+                {toolInfo.function && (
+                  <span className="flex-shrink-0">{toolInfo.function}</span>
+                )}
+                {toolInfo.functionArg && (
+                  <span className="ml-1 min-w-0 truncate font-mono text-[11px] text-[var(--text-tertiary)]">
+                    {toolInfo.functionArg}
+                  </span>
+                )}
+              </span>
+            )}
           </div>
         )}
         <div className="relative flex flex-col rounded-[12px] overflow-hidden bg-[var(--background-gray-main)] border border-[var(--border-dark)] dark:border-black/30 shadow-[0px_4px_32px_0px_rgba(0,0,0,0.04)] flex-1 min-h-0 mt-[16px]">

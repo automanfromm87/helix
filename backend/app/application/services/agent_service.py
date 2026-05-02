@@ -47,6 +47,8 @@ class AgentService:
         self._agent_repository = agent_repository
         self._session_repository = session_repository
         self._file_storage = file_storage
+        self._plan_repository = plan_repository
+        self._project_repository = project_repository
         self._agent_domain_service = AgentDomainService(
             self._agent_repository,
             self._session_repository,
@@ -91,6 +93,96 @@ class AgentService:
         if not session:
             raise NotFoundError("Session not found")
         await self._session_repository.update_project_id(session_id, project_id)
+
+    async def fork_from_plan(
+        self, plan_id: str, user_id: str, target_project_id: Optional[str] = None,
+    ) -> Session:
+        """Branch a session from a specific plan's snapshot.
+
+        Project files are copied (excluding heavy build artifacts) and a
+        fresh git branch is checked out from the plan's tag, with two-way
+        remotes wired up so a future merge-back can `git fetch` either
+        side without manual setup.
+
+        `target_project_id` controls workspace placement. The route layer
+        creates a fresh project for forks so the sidebar (1 project = 1
+        visible session) shows the original AND the fork as siblings;
+        passing the parent's project_id would let the fork displace the
+        parent in the sidebar.
+        """
+        from pathlib import Path
+
+        from app.infrastructure.external.git.plan_versioning import fork_project
+
+        plan = await self._plan_repository.find_plan(plan_id)
+        if not plan:
+            raise NotFoundError("Plan not found")
+        if not plan.commit_sha:
+            raise ValueError(
+                "Plan has no committed snapshot — only completed plans "
+                "with file changes can be forked."
+            )
+
+        parent = await self._session_repository.find_by_id_and_user_id(
+            plan.session_id, user_id,
+        )
+        if not parent:
+            raise NotFoundError("Parent session not found")
+
+        agent = await self._create_agent()
+        new_session = Session(
+            agent_id=agent.id,
+            user_id=user_id,
+            project_id=target_project_id if target_project_id is not None else parent.project_id,
+            system_prompt=parent.system_prompt,
+            title=f"Fork: {plan.title or plan.goal or 'plan'}"[:120],
+        )
+
+        host_root = get_settings().sandbox_data_host_root
+        src = Path(host_root) / parent.id / "project"
+        dst = Path(host_root) / new_session.id / "project"
+        branch = f"fork/{new_session.id[:12]}"
+
+        ok = await fork_project(src, dst, plan_id, branch)
+        if not ok:
+            raise RuntimeError(
+                "Failed to fork project files — see backend logs"
+            )
+
+        await self._session_repository.save(new_session)
+
+        # Spawn the sandbox in the background so the fork API returns
+        # immediately — sandbox creation takes 3-5s (docker container
+        # spin-up + supervisord boot), too long for an interactive
+        # button click. The supervisord-managed dev_server inside the
+        # sandbox brings up vite on its own once the container's alive,
+        # and PreviewToolView's auto-poll catches the URL the moment
+        # the dev server is reachable.
+        import asyncio as _asyncio
+
+        async def _spawn_sandbox_bg() -> None:
+            try:
+                sandbox = await self._sandbox_cls.create(session_id=new_session.id)
+                new_session.sandbox_id = sandbox.id
+                await self._session_repository.save(new_session)
+                logger.info(
+                    "Background-spawned sandbox %s for forked session %s",
+                    sandbox.id, new_session.id,
+                )
+            except Exception:
+                logger.exception(
+                    "Background sandbox create failed for forked session %s; "
+                    "user can recover by sending a chat message",
+                    new_session.id,
+                )
+
+        _asyncio.create_task(_spawn_sandbox_bg())
+
+        logger.info(
+            "Forked session %s from %s @ plan %s (branch %s) — sandbox spawning",
+            new_session.id, parent.id, plan_id, branch,
+        )
+        return new_session
 
     async def _create_agent(self) -> Agent:
         logger.info("Creating new agent")
@@ -201,17 +293,263 @@ class AgentService:
             return []
         return await self._session_repository.search_summaries(user_id, query, limit)
 
+    async def _cleanup_session_resources(
+        self, session_id: str, sandbox_id: Optional[str]
+    ) -> None:
+        """Best-effort: stop+remove the sandbox container and wipe the
+        host bind-mount dir. Failures are logged, not raised — the DB
+        delete must still proceed so the user's UI stays consistent."""
+        import asyncio
+        import shutil
+        from pathlib import Path
+
+        if sandbox_id:
+            try:
+                sandbox = await self._sandbox_cls.get(sandbox_id)
+                await sandbox.destroy()
+                logger.info(
+                    "Destroyed sandbox %s for session %s", sandbox_id, session_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Sandbox destroy failed for session %s (sandbox %s)",
+                    session_id, sandbox_id,
+                )
+
+        # Wipe the bind-mount root for this session — both `project/` (the
+        # workspace) and any sibling files (logs, etc.) the sandbox image
+        # might have written under <session_id>/.
+        host_dir = Path(get_settings().sandbox_data_host_root) / session_id
+        if host_dir.exists():
+            try:
+                await asyncio.to_thread(shutil.rmtree, host_dir)
+                logger.info("Removed bind-mount dir %s", host_dir)
+            except Exception:
+                logger.exception("Failed to rmtree %s", host_dir)
+
     async def delete_session(self, session_id: str, user_id: str) -> None:
-        """Delete a session, ensuring it belongs to the user"""
+        """Delete a session and free its sandbox + disk resources."""
         logger.info(f"Deleting session {session_id} for user {user_id}")
-        # First verify the session belongs to the user
         session = await self._session_repository.find_by_id_and_user_id(session_id, user_id)
         if not session:
             logger.error(f"Session {session_id} not found for user {user_id}")
             raise NotFoundError("Session not found")
-        
+
+        await self._cleanup_session_resources(session_id, session.sandbox_id)
         await self._session_repository.delete(session_id)
         logger.info(f"Session {session_id} deleted successfully")
+
+    async def merge_two_sessions(
+        self, session_a_id: str, session_b_id: str, user_id: str,
+    ) -> dict:
+        """Merge one session's branch into another session's working tree.
+
+        Direction inference: if exactly one of the two is on a `fork/*`
+        branch, that's the source and the other is target. Otherwise
+        raises ValueError — caller should ask the user to disambiguate.
+
+        On clean merge or LLM-resolved merge, persists a synthetic Plan
+        row on the target session (status=COMPLETED, tagged commit_sha
+        set) so the result shows up in the FE's plan history with
+        diff/restore/version bar. On unresolved conflict, the working
+        tree is left mid-merge — caller can surface the file list to
+        the user, who can finish in the agent's shell.
+
+        Returns a dict shaped for direct API serialization:
+        {status, target_session_id, source_session_id, commit_sha?,
+         resolved_files, unresolved_files, error?}.
+        """
+        from pathlib import Path
+
+        from app.domain.models.plan import PlanStatus, TaskInput
+        from app.infrastructure.external.git.merge import (
+            detect_branch,
+            merge_session_with_resolve,
+        )
+        from app.infrastructure.external.git.plan_versioning import (
+            init_repo_if_needed,
+        )
+
+        if session_a_id == session_b_id:
+            raise ValueError("Cannot merge a session with itself")
+
+        sess_a = await self._session_repository.find_by_id_and_user_id(
+            session_a_id, user_id,
+        )
+        sess_b = await self._session_repository.find_by_id_and_user_id(
+            session_b_id, user_id,
+        )
+        if not sess_a or not sess_b:
+            raise NotFoundError("One or both sessions not found")
+
+        host_root = get_settings().sandbox_data_host_root
+        path_a = Path(host_root) / session_a_id / "project"
+        path_b = Path(host_root) / session_b_id / "project"
+
+        if not (path_a / ".git").exists() or not (path_b / ".git").exists():
+            raise ValueError(
+                "Both sessions must have a versioned project (auto-commit "
+                "kicks in on the first plan completion).",
+            )
+
+        branch_a = await detect_branch(path_a)
+        branch_b = await detect_branch(path_b)
+
+        a_is_fork = branch_a.startswith("fork/")
+        b_is_fork = branch_b.startswith("fork/")
+        if a_is_fork == b_is_fork:
+            raise ValueError(
+                f"Cannot infer merge direction (both on '{'fork' if a_is_fork else 'main'}' "
+                "branches). Future: add explicit target picker.",
+            )
+
+        if a_is_fork:
+            source_id, source_path, source_branch = session_a_id, path_a, branch_a
+            target_id, target_path, target_session = (
+                session_b_id, path_b, sess_b,
+            )
+        else:
+            source_id, source_path, source_branch = session_b_id, path_b, branch_b
+            target_id, target_path, target_session = (
+                session_a_id, path_a, sess_a,
+            )
+
+        # Surface the latest plan titles on each side as merge context for
+        # the LLM resolver — much better than generic "main vs fork"
+        # framing when conflicts hit.
+        target_plans = await self._plan_repository.list_plans(target_id)
+        source_plans = await self._plan_repository.list_plans(source_id)
+        target_summary = (
+            (target_plans[0].title or target_plans[0].goal or "").strip()
+            if target_plans else ""
+        ) or "main"
+        source_summary = (
+            (source_plans[0].title or source_plans[0].goal or "").strip()
+            if source_plans else ""
+        ) or f"branch {source_branch}"
+
+        # Pre-create a Plan row so the tag we may set later refers to a
+        # known plan_id. We mark it COMPLETED + set commit_sha only after
+        # a successful merge; on failure we delete or leave it pending.
+        plan = await self._plan_repository.create_with_tasks(
+            session_id=target_id,
+            title=f"Merge fork: {source_summary}"[:120],
+            goal=f"Merge {source_branch} into {await detect_branch(target_path)}",
+            language=None,
+            tasks=[TaskInput(title=f"Merge {source_branch}")],
+        )
+        # Suppress unused-name warning — keep target_session bound in case
+        # we want it for richer summaries later.
+        _ = target_session
+
+        await init_repo_if_needed(target_path)
+
+        result = await merge_session_with_resolve(
+            target_path=target_path,
+            source_session_id=source_id,
+            source_branch=source_branch,
+            target_summary=target_summary,
+            source_summary=source_summary,
+            plan_id_for_tag=plan.id,
+        )
+
+        if result.status in ("merged", "resolved", "noop"):
+            # Mark plan completed; set commit_sha for non-noop results.
+            await self._plan_repository.update_plan_status(
+                plan.id, PlanStatus.COMPLETED,
+            )
+            if result.commit_sha:
+                await self._plan_repository.set_commit_sha(
+                    plan.id, result.commit_sha,
+                )
+            logger.info(
+                "Merged session %s into %s: status=%s commit=%s "
+                "(resolved=%s, unresolved=%s)",
+                source_id, target_id, result.status, result.commit_sha,
+                result.resolved_files, result.unresolved_files,
+            )
+
+            # Consume the source: drop the dead remote, then remove the
+            # source session + (if it had its own project) the project.
+            # Same outcome as if the user had clicked Delete on the fork
+            # in the sidebar — sandbox container gone, bind mount wiped,
+            # DB rows cascaded.
+            from app.infrastructure.external.git.plan_versioning import _run_git
+            from app.infrastructure.external.git.merge import _fork_remote_name
+            try:
+                await _run_git(
+                    target_path,
+                    "remote", "remove", _fork_remote_name(source_id),
+                    check=False,
+                )
+            except Exception:
+                logger.exception("merge: drop fork remote failed")
+
+            try:
+                # Build source session ref again (it might be either A or B).
+                source_session = sess_a if source_id == session_a_id else sess_b
+                source_project_id = source_session.project_id
+                # Wipe sandbox + bind mount.
+                await self._cleanup_session_resources(
+                    source_id, source_session.sandbox_id,
+                )
+                # Drop the session row (cascades plans + tasks + events).
+                await self._session_repository.delete(source_id)
+                # If the fork had its own project (and it's different from
+                # the target's), drop the empty project row too.
+                target_project_id = (
+                    sess_a.project_id if target_id == session_a_id
+                    else sess_b.project_id
+                )
+                if (
+                    source_project_id
+                    and source_project_id != target_project_id
+                    and self._project_repository is not None
+                ):
+                    await self._project_repository.delete(
+                        source_project_id, user_id,
+                    )
+                logger.info(
+                    "Consumed source session %s after merge into %s",
+                    source_id, target_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Post-merge cleanup of source session %s failed", source_id,
+                )
+        else:
+            await self._plan_repository.update_plan_status(
+                plan.id, PlanStatus.FAILED,
+                error=result.error or "merge had unresolved conflicts",
+            )
+            logger.warning(
+                "Merge failed: %s -> %s: status=%s error=%s",
+                source_id, target_id, result.status, result.error,
+            )
+
+        return {
+            "status": result.status,
+            "target_session_id": target_id,
+            "source_session_id": source_id,
+            "commit_sha": result.commit_sha,
+            "resolved_files": result.resolved_files,
+            "unresolved_files": result.unresolved_files,
+            "error": result.error,
+            "plan_id": plan.id,
+        }
+
+    async def cleanup_project_session_resources(
+        self, project_id: str, user_id: str
+    ) -> None:
+        """Free sandbox + disk for every session under a project. Called
+        before `project_service.delete_project` so the bulk DB delete
+        doesn't strand running containers and on-disk bind mounts.
+        Idempotent and best-effort."""
+        sessions = await self._session_repository.find_ids_and_sandbox_by_project_id(
+            project_id, user_id,
+        )
+        for session_id, sandbox_id in sessions:
+            await self._cleanup_session_resources(session_id, sandbox_id)
 
     async def stop_session(self, session_id: str, user_id: str) -> None:
         """Stop a session, ensuring it belongs to the user"""
@@ -290,19 +628,81 @@ class AgentService:
 
     async def get_preview_url(self, session_id: str) -> Optional[str]:
         """Return the `http://localhost:<port>` preview URL for the
-        session's dev server, or None if no port is mapped (legacy
-        sandbox without ports= or a non-DockerSandbox impl).
+        session's dev server, or None if it's not actually reachable.
 
-        Auto-recreates the sandbox if the bound one is gone — same
-        contract as `get_vnc_url` so the FE preview iframe survives
-        restart-then-reopen flows.
+        Liveness probe: `Sandbox.get` is `@alru_cache`d, so a cached
+        Sandbox object's preview_url may point at a port whose
+        container has since died (or whose vite process crashed). We
+        HEAD the URL with a short timeout to catch that. On probe fail
+        we invalidate the cache and resolve again — if the container's
+        actually gone, `_resolve_or_recreate_sandbox` spins up a
+        replacement so the user doesn't have to chat just to revive a
+        dead preview.
         """
+        import httpx
+
         logger.info(f"Getting preview URL for session {session_id}")
         session = await self._session_repository.find_by_id(session_id)
         if not session:
             raise NotFoundError("Session not found")
-        sandbox = await self._resolve_or_recreate_sandbox(session)
-        return getattr(sandbox, "preview_url", None)
+        if not session.sandbox_id:
+            return None
+        try:
+            sandbox = await self._sandbox_cls.get(session.sandbox_id)
+        except SandboxUnavailableError:
+            logger.info(
+                "Preview lookup: session %s sandbox %s gone, recreating",
+                session_id, session.sandbox_id,
+            )
+            sandbox = await self._resolve_or_recreate_sandbox(session)
+
+        url = getattr(sandbox, "preview_url", None)
+        if not url:
+            return None
+
+        async def _probe(target: str) -> bool:
+            # Probe using the sandbox's docker-network IP, not the host-facing
+            # URL. Backend container's `localhost` is itself, so probing
+            # `localhost:<host_port>` always fails even when vite is up
+            # inside the sandbox.
+            try:
+                async with httpx.AsyncClient(timeout=1.5) as client:
+                    r = await client.head(target)
+                    return r.status_code < 500
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
+                return False
+
+        probe_url = getattr(sandbox, "preview_internal_url", None) or url
+        if await _probe(probe_url):
+            return url
+
+        # Probe failed — could be (a) cached Sandbox object pointing at a
+        # dead container, or (b) vite crashed inside a live container.
+        # Drop the cache entry; `_resolve_or_recreate_sandbox` will hit
+        # docker fresh, raise SandboxUnavailableError if (a), and spawn a
+        # replacement. For (b) we get the same Sandbox back and the
+        # second probe still fails — supervisord will restart vite on its
+        # own, just not in time for this request.
+        logger.info(
+            "Preview probe: session %s url %s unreachable, retrying after cache flush",
+            session_id, probe_url,
+        )
+        try:
+            self._sandbox_cls.get.cache_invalidate(session.sandbox_id)
+        except Exception:
+            pass
+        try:
+            sandbox = await self._resolve_or_recreate_sandbox(session)
+        except Exception as e:
+            logger.info("Preview recreate failed for session %s: %s", session_id, e)
+            return None
+        url = getattr(sandbox, "preview_url", None)
+        if not url:
+            return None
+        probe_url = getattr(sandbox, "preview_internal_url", None) or url
+        if await _probe(probe_url):
+            return url
+        return None
 
     async def get_vnc_url(self, session_id: str) -> str:
         """Get VNC URL for a session, ensuring it belongs to the user.

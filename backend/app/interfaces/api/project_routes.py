@@ -112,7 +112,14 @@ async def delete_project(
     project_id: str,
     current_user: User = Depends(get_current_user),
     project_service: ProjectService = Depends(get_project_service),
+    agent_service: AgentService = Depends(get_agent_service),
 ) -> APIResponse[None]:
+    # Free sandbox containers + bind-mount dirs BEFORE the bulk DB delete —
+    # otherwise running docker containers and host directories outlive the
+    # project rows that knew about them.
+    await agent_service.cleanup_project_session_resources(
+        project_id, current_user.id,
+    )
     await project_service.delete_project(project_id, current_user.id)
     return APIResponse.success()
 

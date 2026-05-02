@@ -195,6 +195,7 @@ class PlanEventData(BaseEventData):
     goal: str
     status: PlanStatus
     error: Optional[str] = None
+    commit_sha: Optional[str] = None
     tasks: List[TaskEventData]
 
 
@@ -212,6 +213,7 @@ class PlanSSEEvent(BaseSSEEvent):
                 goal=event.plan.goal,
                 status=event.status,
                 error=event.plan.error,
+                commit_sha=event.plan.commit_sha,
                 tasks=[
                     TaskEventData(
                         **BaseEventData.base_event_data(event),

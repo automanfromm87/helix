@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   AlertCircle,
   Ban,
@@ -8,13 +9,18 @@ import {
   ChevronRight,
   ChevronUp,
   Circle,
+  GitBranch,
+  GitCommit,
   History,
   Loader2,
+  RotateCcw,
 } from 'lucide-react'
 
 import Markdown from './Markdown'
+import { forkPlan, getPlanDiff, restorePlan } from '@/api/agent'
 import type { PlanEventData, TaskEventData, TaskStatusValue } from '@/types/event'
 import { cn } from '@/lib/utils'
+import { showErrorToast, showSuccessToast } from '@/utils/toast'
 
 interface Props {
   plan: PlanEventData
@@ -132,10 +138,10 @@ function HeaderRow({ task }: { task: TaskEventData }) {
             'flex items-center gap-1 text-[13px] leading-snug',
             dim && 'text-[var(--text-tertiary)]',
             !dim && 'text-[var(--text-primary)]',
-            // Completed tasks: dim slightly + light strikethrough so the
-            // user can still read what was done. Avoids the previous "huge
-            // wall of struck-through text" look.
-            isCompleted && 'text-[var(--text-tertiary)] line-through decoration-[var(--text-tertiary)]/60',
+            // Completed tasks: dim + reduced opacity rather than
+            // strikethrough — line-through is hard to read in CJK fonts and
+            // turns long plans into a "wall of struck-out text".
+            isCompleted && 'text-[var(--text-tertiary)] opacity-60',
           )}
         >
           {hasDetails && (
@@ -256,7 +262,7 @@ export default function PlanPanel({
   const canGoNewer = showNav && (historyIndex ?? 0) > 0
 
   return (
-    <div className="border border-[var(--border-main)] dark:border-[var(--border-light)] bg-[var(--background-menu-white)] rounded-[12px] shadow-[0px_0px_1px_0px_rgba(0,0,0,0.05),0px_4px_16px_0px_rgba(0,0,0,0.04)]">
+    <div className="border border-[var(--border-light)] bg-[var(--background-menu-white)] rounded-[12px] shadow-[0px_1px_2px_0px_rgba(0,0,0,0.04)]">
       {showNav && (
         <div
           className={cn(
@@ -360,6 +366,7 @@ export default function PlanPanel({
 
       {!collapsed && (
         <div className="border-t border-[var(--border-light)] py-1 max-h-[40vh] overflow-y-auto">
+          {plan.commit_sha && isDone && <PlanVersionBar plan={plan} />}
           {plan.tasks.length === 0 ? (
             <div className="px-4 py-3 text-sm text-[var(--text-tertiary)]">
               No tasks
@@ -388,3 +395,138 @@ export default function PlanPanel({
     </div>
   )
 }
+
+
+function PlanVersionBar({ plan }: { plan: PlanEventData }) {
+  const navigate = useNavigate()
+  const [diff, setDiff] = useState<string | null>(null)
+  const [diffOpen, setDiffOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+  const [forking, setForking] = useState(false)
+  const short = plan.commit_sha?.slice(0, 7) ?? ''
+
+  const onViewDiff = async () => {
+    if (diffOpen) {
+      setDiffOpen(false)
+      return
+    }
+    setDiffOpen(true)
+    if (diff !== null) return
+    setLoading(true)
+    try {
+      const r = await getPlanDiff(plan.plan_id)
+      setDiff(r.diff || '')
+    } catch (e) {
+      console.error('plan diff failed', e)
+      showErrorToast('Failed to load diff')
+      setDiff('')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const onRestore = async () => {
+    if (
+      !window.confirm(
+        `Restore project to "${plan.title || plan.goal}"? This is destructive — uncommitted changes will be lost.`,
+      )
+    )
+      return
+    setRestoring(true)
+    try {
+      const ok = await restorePlan(plan.plan_id)
+      if (ok) showSuccessToast('Project restored to this version')
+      else showErrorToast('Restore failed')
+    } catch (e) {
+      console.error('restore failed', e)
+      showErrorToast('Restore failed')
+    } finally {
+      setRestoring(false)
+    }
+  }
+
+  const onFork = async () => {
+    setForking(true)
+    try {
+      const newSessionId = await forkPlan(plan.plan_id)
+      showSuccessToast('Forked to new session')
+      navigate(`/chat/${newSessionId}`)
+    } catch (e) {
+      console.error('fork failed', e)
+      showErrorToast('Fork failed')
+    } finally {
+      setForking(false)
+    }
+  }
+
+  return (
+    <div className="mx-3 my-1 rounded-md border border-[var(--border-light)] bg-[var(--fill-tsp-white-light)]">
+      <div className="flex items-center gap-2 px-2.5 py-1.5 text-[12px]">
+        <GitCommit size={12} className="text-[var(--text-tertiary)] flex-shrink-0" />
+        <span className="font-mono text-[var(--text-secondary)] flex-shrink-0">{short}</span>
+        <span className="text-[var(--text-tertiary)]">snapshot</span>
+        <div className="flex-1" />
+        <button
+          type="button"
+          onClick={onViewDiff}
+          className="px-2 h-6 rounded text-[var(--text-secondary)] hover:bg-[var(--fill-tsp-white-dark)] transition-colors"
+        >
+          {diffOpen ? 'Hide diff' : 'View diff'}
+        </button>
+        <button
+          type="button"
+          onClick={onFork}
+          disabled={forking}
+          className="px-2 h-6 rounded inline-flex items-center gap-1 text-[var(--text-secondary)] hover:bg-[var(--fill-tsp-white-dark)] disabled:opacity-50 transition-colors"
+          title="Branch a new session from this snapshot"
+        >
+          <GitBranch size={11} />
+          <span>{forking ? 'Forking…' : 'Fork'}</span>
+        </button>
+        <button
+          type="button"
+          onClick={onRestore}
+          disabled={restoring}
+          className="px-2 h-6 rounded inline-flex items-center gap-1 text-[var(--text-secondary)] hover:bg-[var(--fill-tsp-white-dark)] disabled:opacity-50 transition-colors"
+          title="Reset project files to this version"
+        >
+          <RotateCcw size={11} />
+          <span>{restoring ? 'Restoring…' : 'Restore'}</span>
+        </button>
+      </div>
+      {diffOpen && (
+        <div className="border-t border-[var(--border-light)]">
+          {loading ? (
+            <div className="px-3 py-2 text-[12px] text-[var(--text-tertiary)]">
+              Loading diff…
+            </div>
+          ) : !diff ? (
+            <div className="px-3 py-2 text-[12px] text-[var(--text-tertiary)]">
+              No changes recorded for this plan.
+            </div>
+          ) : (
+            <pre className="m-0 px-3 py-2 max-h-[40vh] overflow-auto text-[11.5px] leading-[1.45] font-mono whitespace-pre">
+              {diff.split('\n').map((line, i) => {
+                const cls =
+                  line.startsWith('+') && !line.startsWith('+++')
+                    ? 'text-[var(--function-success)]'
+                    : line.startsWith('-') && !line.startsWith('---')
+                      ? 'text-[var(--function-error)]'
+                      : line.startsWith('@@')
+                        ? 'text-[var(--text-brand)]'
+                        : 'text-[var(--text-secondary)]'
+                return (
+                  <div key={i} className={cls}>
+                    {line || ' '}
+                  </div>
+                )
+              })}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+

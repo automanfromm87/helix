@@ -32,6 +32,10 @@ class PlanRepository(Protocol):
         self, plan_id: str, status: PlanStatus, error: Optional[str] = None
     ) -> None: ...
 
+    async def set_commit_sha(self, plan_id: str, commit_sha: str) -> None:
+        """Persist the auto-commit SHA produced when this plan finished."""
+        ...
+
     async def find_task(self, task_id: str) -> Optional[Task]: ...
 
     async def update_task_status(

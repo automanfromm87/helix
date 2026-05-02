@@ -78,14 +78,37 @@ in `app/main.py` (see §4) and delete the stub. Update `pyproject.toml`'s
 `[project.scripts]` if you want a CLI entry; otherwise the user runs
 `uv run fastapi dev app/main.py`.
 
-**2d. Boot the dev server**
+**2d. Verify uvicorn is up — DO NOT start it yourself**
+
+The sandbox runs uvicorn as a supervisord-managed service
+(`/usr/local/bin/helix-dev-runner.sh`). When a `pyproject.toml`
+mentioning `fastapi`/`uvicorn` appears in `/home/ubuntu/project`,
+supervisord runs `uv sync` if needed and starts
+`uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload`.
+`--reload` keeps the running process in sync with your file edits.
+
+Your job is to **verify** uvicorn is reachable, not to start it.
 
 ```bash
-uv run fastapi dev app/main.py --host 0.0.0.0 --port 8000
+# Allow up to 30s for uv sync on a cold sandbox.
+for i in {1..15}; do
+  curl -fsS http://localhost:8000/docs -o /dev/null && { echo OK; break; }
+  sleep 2
+done
 ```
 
-Don't proceed until you've seen the server bind to a port AND a `GET /`
-returns 200 (or whatever the user's first endpoint is).
+If curl never returns OK: `supervisorctl status dev_server` and tail
+the dev_server log to see why (usually an import error or syntax
+problem at module top level — fix the code; supervisord will pick up
+the next reload cycle on its own).
+
+**Never** run `nohup uv run uvicorn …` or `shell_kill_process` on
+uvicorn. The dev server is not your process. If you absolutely need a
+clean restart (rare — `--reload` handles edits), use
+`sudo supervisorctl restart dev_server`.
+
+Don't proceed until curl returns OK AND `GET /` (or the first endpoint)
+returns 200.
 
 ## 3. pyproject.toml — the only source of truth
 
