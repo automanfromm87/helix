@@ -9,15 +9,25 @@ import {
   ChevronRight,
   ChevronUp,
   Circle,
+  Columns3,
   GitBranch,
   GitCommit,
   History,
   Loader2,
   RotateCcw,
+  X,
 } from 'lucide-react'
 
 import Markdown from './Markdown'
-import { forkPlan, getPlanDiff, restorePlan } from '@/api/agent'
+import { forkPlan, forkPlanMany, getPlanDiff, restorePlan } from '@/api/agent'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/Dialog'
 import type { PlanEventData, TaskEventData, TaskStatusValue } from '@/types/event'
 import { cn } from '@/lib/utils'
 import { showErrorToast, showSuccessToast } from '@/utils/toast'
@@ -460,6 +470,8 @@ function PlanVersionBar({ plan }: { plan: PlanEventData }) {
     }
   }
 
+  const [variantsOpen, setVariantsOpen] = useState(false)
+
   return (
     <div className="mx-3 my-1 rounded-md border border-[var(--border-light)] bg-[var(--fill-tsp-white-light)]">
       <div className="flex items-center gap-2 px-2.5 py-1.5 text-[12px]">
@@ -483,6 +495,15 @@ function PlanVersionBar({ plan }: { plan: PlanEventData }) {
         >
           <GitBranch size={11} />
           <span>{forking ? 'Forking…' : 'Fork'}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setVariantsOpen(true)}
+          className="px-2 h-6 rounded inline-flex items-center gap-1 text-[var(--text-secondary)] hover:bg-[var(--fill-tsp-white-dark)] transition-colors"
+          title="Spawn N parallel forks for side-by-side compare"
+        >
+          <Columns3 size={11} />
+          <span>Variants</span>
         </button>
         <button
           type="button"
@@ -526,7 +547,141 @@ function PlanVersionBar({ plan }: { plan: PlanEventData }) {
           )}
         </div>
       )}
+      <VariantsDialog
+        open={variantsOpen}
+        onOpenChange={setVariantsOpen}
+        planId={plan.plan_id}
+        planTitle={plan.title || plan.goal || 'plan'}
+      />
     </div>
+  )
+}
+
+
+function VariantsDialog({
+  open,
+  onOpenChange,
+  planId,
+  planTitle,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  planId: string
+  planTitle: string
+}) {
+  const navigate = useNavigate()
+  // Default to 3 labeled rows. Each row's label seeds the per-fork
+  // project name and labels the column on the compare page; the user
+  // hasn't typed an actual prompt yet because the per-variant prompt
+  // gets entered in each forked session's chat. Variants is for
+  // *parallel* exploration, not predeclared parallel chats.
+  const [rows, setRows] = useState<string[]>(['Minimalist', 'Bold', 'Experimental'])
+  const [busy, setBusy] = useState(false)
+
+  const setRow = (i: number, v: string) =>
+    setRows((prev) => prev.map((r, idx) => (idx === i ? v : r)))
+
+  const onAdd = () => {
+    if (rows.length >= 6) return
+    setRows((prev) => [...prev, `Variant ${prev.length + 1}`])
+  }
+  const onRemove = (i: number) => {
+    if (rows.length <= 2) return
+    setRows((prev) => prev.filter((_, idx) => idx !== i))
+  }
+
+  const onSubmit = async () => {
+    const labels = rows.map((r) => r.trim()).filter(Boolean)
+    if (labels.length < 2) {
+      showErrorToast('Need at least 2 labeled variants')
+      return
+    }
+    setBusy(true)
+    try {
+      const sessions = await forkPlanMany(planId, labels.length, labels)
+      const ids = sessions.map((s) => s.session_id).join(',')
+      // Round-trip user-controlled labels through base64 so commas /
+      // ampersands in the label can't break the URL.
+      const enc = sessions
+        .map((s) =>
+          s.label ? btoa(unescape(encodeURIComponent(s.label))) : '',
+        )
+        .join(',')
+      onOpenChange(false)
+      navigate(`/compare?sessions=${ids}&labels=${enc}`)
+    } catch (e) {
+      console.error('fork-many failed', e)
+      showErrorToast('Failed to spawn variants')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Spawn variants</DialogTitle>
+          <DialogDescription>
+            Fork "{planTitle}" into 2-6 parallel sessions. Each one gets
+            its own sandbox; you'll land on a compare page where you
+            can prompt each one differently and pick the winner.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-2 mt-2">
+          {rows.map((label, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <span className="text-[12px] tabular-nums text-[var(--text-tertiary)] w-4">
+                {i + 1}
+              </span>
+              <input
+                type="text"
+                value={label}
+                onChange={(e) => setRow(i, e.target.value)}
+                placeholder={`Variant ${i + 1} label`}
+                className="flex-1 h-8 px-2 rounded-md text-sm bg-[var(--fill-tsp-white-light)] border border-[var(--border-light)] focus:outline-none focus:ring-1 focus:ring-[var(--text-brand)]"
+              />
+              <button
+                type="button"
+                onClick={() => onRemove(i)}
+                disabled={rows.length <= 2}
+                className="h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-[var(--fill-tsp-white-light)] text-[var(--icon-secondary)] disabled:opacity-40"
+                title="Remove"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={onAdd}
+            disabled={rows.length >= 6}
+            className="self-start text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-40"
+          >
+            + Add variant
+          </button>
+        </div>
+        <DialogFooter>
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            disabled={busy}
+            className="h-9 px-4 rounded-md text-sm font-medium border border-[var(--border-btn-main)] hover:bg-[var(--fill-tsp-white-light)] disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={busy}
+            className="h-9 px-4 rounded-md text-sm font-medium bg-[var(--text-brand)] text-white hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1.5"
+          >
+            {busy && <Loader2 size={14} className="animate-spin" />}
+            Spawn {rows.length}
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

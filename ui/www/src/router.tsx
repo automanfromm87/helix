@@ -11,6 +11,7 @@ import {
 import LoginPage from '@/pages/LoginPage'
 import HomePage from '@/pages/HomePage'
 import ChatPage from '@/pages/ChatPage'
+import ComparePage from '@/pages/ComparePage'
 import MainLayout from '@/pages/MainLayout'
 import ShareLayout from '@/pages/ShareLayout'
 import SharePage from '@/pages/SharePage'
@@ -99,6 +100,15 @@ export const router = createBrowserRouter(
       <Route path="/share" element={<ShareLayout />}>
         <Route path=":sessionId" element={<SharePage />} />
       </Route>
+
+      <Route
+        path="/compare"
+        element={
+          <RequireAuth>
+            <ComparePage />
+          </RequireAuth>
+        }
+      />
 
       <Route
         path="/login"

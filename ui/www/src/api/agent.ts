@@ -387,3 +387,22 @@ export async function setRetrievalMode(
     { enabled },
   )
 }
+
+export interface ForkManySession {
+  session_id: string
+  project_id: string
+  label: string | null
+}
+
+export async function forkPlanMany(
+  planId: string, count: number, labels?: string[],
+): Promise<ForkManySession[]> {
+  const r = await apiClient.post<
+    ApiResponse<{ plan_id: string; sessions: ForkManySession[] }>
+  >(
+    `/plans/${planId}/fork-many`,
+    { count, labels: labels ?? null },
+    { timeout: 5 * 60 * 1000 },
+  )
+  return r.data.data.sessions
+}

@@ -23,6 +23,9 @@ from app.interfaces.schemas.plan import (
     GetPlanResponse,
     ListPlansResponse,
     PlanDiffResponse,
+    PlanForkManyRequest,
+    PlanForkManyResponse,
+    PlanForkManySession,
     PlanForkResponse,
     PlanItem,
     PlanRestoreResponse,
@@ -172,4 +175,78 @@ async def fork_plan(
         raise HTTPException(status_code=400, detail=str(e))
     return APIResponse.success(
         PlanForkResponse(plan_id=plan_id, new_session_id=new_session.id)
+    )
+
+
+@router.post(
+    "/plans/{plan_id}/fork-many",
+    response_model=APIResponse[PlanForkManyResponse],
+)
+async def fork_plan_many(
+    plan_id: str,
+    body: PlanForkManyRequest,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+    plan_service: PlanService = Depends(get_plan_service),
+    project_service: ProjectService = Depends(get_project_service),
+) -> APIResponse[PlanForkManyResponse]:
+    """Spawn N parallel forks from one plan for side-by-side compare.
+
+    Each fork is structurally identical to a single `/fork` call —
+    fresh project, fresh session, sandbox spinning up in the background
+    via the registry. The FE collects the returned session ids and
+    navigates to a compare view that shows their previews
+    side-by-side.
+
+    Hard cap of 6 because beyond that the compare page can't show
+    iframes large enough to be useful, and we'd rather slow the user
+    down than let them DOS the local docker daemon. Forks are
+    sequential at the route layer (one git copytree at a time) — the
+    bg-sandbox-spawn happens via asyncio.create_task so the API
+    returns once project state is staged for all variants.
+    """
+    if body.count < 2:
+        raise HTTPException(
+            status_code=400, detail="count must be at least 2",
+        )
+    if body.count > 6:
+        raise HTTPException(status_code=400, detail="count must be at most 6")
+    if body.labels is not None and len(body.labels) != body.count:
+        raise HTTPException(
+            status_code=400,
+            detail="labels length must match count",
+        )
+
+    try:
+        plan = await plan_service.get_plan(plan_id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    sessions: list[PlanForkManySession] = []
+    for i in range(body.count):
+        label = body.labels[i] if body.labels else None
+        # Project name embeds the variant index so the sidebar reflects
+        # the relationship at a glance — `Variant 1: Fork: <plan>`.
+        base = plan.title or plan.goal or "plan"
+        suffix = f": {label}" if label else f" #{i + 1}"
+        proj = await project_service.create_project(
+            current_user.id,
+            name=f"Variant{suffix} ({base})"[:120],
+        )
+        try:
+            new_session = await agent_service.fork_from_plan(
+                plan_id, current_user.id, target_project_id=proj.id,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        sessions.append(
+            PlanForkManySession(
+                session_id=new_session.id,
+                project_id=proj.id,
+                label=label,
+            )
+        )
+
+    return APIResponse.success(
+        PlanForkManyResponse(plan_id=plan_id, sessions=sessions)
     )
