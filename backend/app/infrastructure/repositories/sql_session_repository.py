@@ -73,6 +73,7 @@ def _row_to_domain(row: SessionRow, events: List[AgentEvent]) -> Session:
         files=files,
         status=SessionStatus(row.status),
         is_shared=row.is_shared,
+        retrieval_only_context=row.retrieval_only_context,
     )
 
 
@@ -92,6 +93,7 @@ def _new_session_row(session: Session) -> SessionRow:
         latest_message=session.latest_message,
         latest_message_at=session.latest_message_at,
         is_shared=session.is_shared,
+        retrieval_only_context=session.retrieval_only_context,
         files=[f.model_dump(mode="json") for f in session.files],
         created_at=session.created_at,
         updated_at=session.updated_at,
@@ -163,6 +165,7 @@ class SqlSessionRepository(SessionRepository):
                 row.latest_message = session.latest_message
                 row.latest_message_at = session.latest_message_at
                 row.is_shared = session.is_shared
+                row.retrieval_only_context = session.retrieval_only_context
                 row.files = [f.model_dump(mode="json") for f in session.files]
             await db.commit()
 

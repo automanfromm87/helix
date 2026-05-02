@@ -145,6 +145,12 @@ async def lifespan(app: FastAPI):
         await conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_sessions_project_id ON sessions(project_id)"
         ))
+        # Per-session toggle: when true, attached context files are reached
+        # only via the `retrieve` tool, never dumped into the prompt.
+        await conn.execute(text(
+            "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS "
+            "retrieval_only_context BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
         # Project / session prompt snapshot columns (added when Project gained content).
         await conn.execute(text(
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS system_prompt TEXT"

@@ -72,3 +72,7 @@ class Session(BaseModel):
     files: List[FileInfo] = []
     status: SessionStatus = SessionStatus.PENDING
     is_shared: bool = False  # Whether this session is shared publicly
+    # When True, context_files are reached via the `retrieve` tool only —
+    # never dumped into `extra_system_prompt`. Worthwhile when the corpus
+    # is large enough that the dump cost dominates the token budget.
+    retrieval_only_context: bool = False

@@ -118,3 +118,19 @@ class ContextFileSummary(BaseModel):
 
 class ContextFileListResponse(BaseModel):
     files: List[ContextFileSummary]
+
+
+class ContextFileFromUrlRequest(BaseModel):
+    url: str
+
+
+class RetrievalModeRequest(BaseModel):
+    enabled: bool
+
+
+class SessionSettingsResponse(BaseModel):
+    """Subset of session row exposed as 'settings' to the UI. Kept narrow
+    on purpose — non-settings session fields (sandbox_id, status, etc.)
+    have their own GETs."""
+
+    retrieval_only_context: bool

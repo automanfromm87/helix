@@ -15,11 +15,12 @@ from app.infrastructure.logging import bind_log_context
 from app.interfaces.dependencies import get_agent_service, get_current_user, get_optional_current_user, get_token_service, verify_signature_websocket
 from app.interfaces.schemas.base import APIResponse
 from app.interfaces.schemas.session import (
-    ChatRequest, ContextFileListResponse, ContextFileSummary,
-    ContextFileUploadRequest, CreateSessionRequest, CreateSessionResponse,
-    GetSessionResponse, ListSessionItem, ListSessionResponse, RegenerateRequest,
-    ShareSessionResponse, SharedSessionResponse, ShellViewRequest,
-    ShellViewResponse, UpdateSessionProjectRequest,
+    ChatRequest, ContextFileFromUrlRequest, ContextFileListResponse,
+    ContextFileSummary, ContextFileUploadRequest, CreateSessionRequest,
+    CreateSessionResponse, GetSessionResponse, ListSessionItem,
+    ListSessionResponse, RegenerateRequest, RetrievalModeRequest,
+    SessionSettingsResponse, ShareSessionResponse, SharedSessionResponse,
+    ShellViewRequest, ShellViewResponse, UpdateSessionProjectRequest,
 )
 from app.application.services.project_service import ProjectService
 from app.interfaces.dependencies import get_project_service
@@ -645,6 +646,70 @@ async def delete_context_file(
 ) -> APIResponse[None]:
     await agent_service.remove_context_file(
         session_id, current_user.id, file_id,
+    )
+    return APIResponse.success(None)
+
+
+@router.post(
+    "/{session_id}/context-files/from-url",
+    response_model=APIResponse[ContextFileSummary],
+)
+async def add_context_file_from_url(
+    session_id: str,
+    body: ContextFileFromUrlRequest,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> APIResponse[ContextFileSummary]:
+    """Fetch a URL, convert HTML→Markdown, attach as a context file."""
+    try:
+        cf = await agent_service.add_context_file_from_url(
+            session_id, current_user.id, body.url,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return APIResponse.success(
+        ContextFileSummary(
+            id=cf.id,
+            filename=cf.filename,
+            size=cf.size,
+            created_at=cf.created_at,
+        )
+    )
+
+
+@router.get(
+    "/{session_id}/settings",
+    response_model=APIResponse[SessionSettingsResponse],
+)
+async def get_session_settings(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> APIResponse[SessionSettingsResponse]:
+    session = await agent_service.get_session(session_id, current_user.id)
+    if not session:
+        raise NotFoundError("Session not found")
+    return APIResponse.success(
+        SessionSettingsResponse(
+            retrieval_only_context=session.retrieval_only_context,
+        )
+    )
+
+
+@router.post(
+    "/{session_id}/retrieval-mode",
+    response_model=APIResponse[None],
+)
+async def set_retrieval_mode(
+    session_id: str,
+    body: RetrievalModeRequest,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> APIResponse[None]:
+    """Toggle retrieval-only mode for context files. When enabled,
+    the agent only sees attached files via the `retrieve` tool."""
+    await agent_service.set_retrieval_only(
+        session_id, current_user.id, body.enabled,
     )
     return APIResponse.success(None)
 

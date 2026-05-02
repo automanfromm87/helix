@@ -844,6 +844,89 @@ class AgentService:
         )
         if not ok:
             raise NotFoundError("Context file not found")
+
+    async def set_retrieval_only(
+        self, session_id: str, user_id: str, enabled: bool,
+    ) -> None:
+        """Toggle retrieval-only mode. When True, attached context files
+        won't be dumped into the agent's prompt — it'll only see them
+        via the `retrieve` tool."""
+        session = await self._session_repository.find_by_id_and_user_id(
+            session_id, user_id,
+        )
+        if not session:
+            raise NotFoundError("Session not found")
+        session.retrieval_only_context = enabled
+        await self._session_repository.save(session)
+        logger.info(
+            "Session %s retrieval_only_context=%s", session_id, enabled,
+        )
+
+    async def add_context_file_from_url(
+        self, session_id: str, user_id: str, url: str,
+    ) -> ContextFile:
+        """Fetch `url`, convert HTML body to Markdown, attach. Saves
+        the user the round-trip of saving a doc by hand. Limits the
+        same as `add_context_file` (size + count caps).
+
+        Why HTML→MD here, not just raw text: most useful URLs are docs
+        sites (Stripe, Anthropic, MDN), where the visual hierarchy is
+        meaningful — preserving headings/lists makes retrieve scoring
+        cleaner. We let `markdownify` strip script/style tags. Sites
+        that gate behind JS won't render usefully — that's a v2 problem.
+        """
+        import httpx
+        from markdownify import markdownify
+
+        url = url.strip()
+        if not url:
+            raise ValueError("url is required")
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise ValueError("url must start with http:// or https://")
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                follow_redirects=True,
+                headers={
+                    # Identify ourselves; some doc sites 403 anonymous bots.
+                    "User-Agent": (
+                        "Mozilla/5.0 (compatible; HelixAgent/1.0; "
+                        "+https://helix.local)"
+                    ),
+                },
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise ValueError(f"could not fetch url: {e}") from e
+
+        ctype = resp.headers.get("content-type", "")
+        if "text/html" not in ctype and "application/xhtml" not in ctype:
+            # Plain text → take as-is. Anything else → reject.
+            if "text/" in ctype:
+                content = resp.text
+            else:
+                raise ValueError(
+                    f"unsupported content-type: {ctype!r} (only text/html "
+                    f"and text/plain are accepted)"
+                )
+        else:
+            content = markdownify(resp.text, heading_style="ATX").strip()
+
+        if not content:
+            raise ValueError("fetched body was empty after conversion")
+
+        # Derive a filename from the URL path for display purposes only.
+        # The id is what `remove` uses; filename is purely visual.
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        slug = parsed.path.rstrip("/").rsplit("/", 1)[-1] or parsed.netloc
+        if not slug.endswith(".md"):
+            slug = f"{slug}.md"
+
+        return await self.add_context_file(session_id, user_id, slug, content)
     
     async def get_shared_session_files(self, session_id: str) -> List[FileInfo]:
         """Get files for a shared session"""

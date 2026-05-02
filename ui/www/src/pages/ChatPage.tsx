@@ -37,6 +37,7 @@ import ChatMessage from '@/components/ChatMessage'
 import LoadingIndicator from '@/components/ui/LoadingIndicator'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover'
 import PlanPanel from '@/components/PlanPanel'
+import PlanTimeline from '@/components/PlanTimeline'
 import SessionSettingsDialog from '@/components/SessionSettingsDialog'
 import { ShareIcon } from '@/components/icons'
 import { SimpleBar, type SimpleBarHandle } from '@/components/ui/SimpleBar'
@@ -974,6 +975,11 @@ export default function ChatPage() {
             if (!displayedPlan || displayedPlan.tasks.length === 0) return null
             return (
               <div className="sticky top-0 z-10 pt-2 pb-1 bg-[var(--background-gray-main)]">
+                <PlanTimeline
+                  plans={planHistory}
+                  activeIndex={viewedPlanIndex}
+                  onSelect={(idx) => setViewedPlanIndex(idx)}
+                />
                 <PlanPanel
                   plan={displayedPlan}
                   historyTotal={planHistory.length}

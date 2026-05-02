@@ -351,3 +351,39 @@ export async function deleteContextFile(
     `/sessions/${sessionId}/context-files/${fileId}`,
   )
 }
+
+export async function uploadContextFileFromUrl(
+  sessionId: string, url: string,
+): Promise<ContextFileSummary> {
+  // 30s timeout — server fetches the URL synchronously and a slow
+  // upstream (huge docs page) would blow past axios default before the
+  // server gets a chance to return.
+  const r = await apiClient.post<ApiResponse<ContextFileSummary>>(
+    `/sessions/${sessionId}/context-files/from-url`,
+    { url },
+    { timeout: 30_000 },
+  )
+  return r.data.data
+}
+
+export interface SessionSettings {
+  retrieval_only_context: boolean
+}
+
+export async function getSessionSettings(
+  sessionId: string,
+): Promise<SessionSettings> {
+  const r = await apiClient.get<ApiResponse<SessionSettings>>(
+    `/sessions/${sessionId}/settings`,
+  )
+  return r.data.data
+}
+
+export async function setRetrievalMode(
+  sessionId: string, enabled: boolean,
+): Promise<void> {
+  await apiClient.post<ApiResponse<null>>(
+    `/sessions/${sessionId}/retrieval-mode`,
+    { enabled },
+  )
+}

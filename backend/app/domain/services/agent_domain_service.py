@@ -149,26 +149,41 @@ class AgentDomainService:
                 project_overrides=project_overrides,
             )
 
-        # Compose the extra system prompt: user-set project-level prompt
-        # plus the per-session reference docs (Markdown attachments). The
-        # docs are appended verbatim under a clear header so the model
-        # can cite filenames back. Order: user-prompt first (carries
-        # tone/role), then reference docs (the agent treats them as
-        # ground truth, not instructions).
+        # Compose the extra system prompt. Order: user-set prompt
+        # (tone/role) first, then a reference-docs block so the model
+        # treats them as authoritative, with filenames the agent can
+        # cite back. In `retrieval_only_context` mode we DON'T dump
+        # bodies — we list filenames + sizes so the agent knows what's
+        # available and reaches for `retrieve(query)` instead. That
+        # trades a small response-time hit (one extra tool turn) for
+        # a much smaller per-turn prompt when the corpus is big.
         prompt_parts: list[str] = []
         if session.system_prompt:
             prompt_parts.append(session.system_prompt.strip())
         if context_files:
-            doc_blocks = [
-                f"### {cf.filename}\n\n{cf.content.strip()}"
-                for cf in context_files
-            ]
-            prompt_parts.append(
-                "## Reference documents\n\n"
-                "The user has attached the following documents to this session. "
-                "Treat them as authoritative context.\n\n"
-                + "\n\n---\n\n".join(doc_blocks)
-            )
+            if session.retrieval_only_context:
+                index = "\n".join(
+                    f"- `{cf.filename}` ({cf.size} bytes)" for cf in context_files
+                )
+                prompt_parts.append(
+                    "## Reference documents (retrieve mode)\n\n"
+                    "The user has attached the documents below. They are "
+                    "NOT included in this prompt — call the `retrieve` "
+                    "tool with a focused keyword query to read relevant "
+                    "chunks before making decisions that depend on them.\n\n"
+                    + index
+                )
+            else:
+                doc_blocks = [
+                    f"### {cf.filename}\n\n{cf.content.strip()}"
+                    for cf in context_files
+                ]
+                prompt_parts.append(
+                    "## Reference documents\n\n"
+                    "The user has attached the following documents to this session. "
+                    "Treat them as authoritative context.\n\n"
+                    + "\n\n---\n\n".join(doc_blocks)
+                )
         extra_system_prompt = "\n\n".join(prompt_parts) if prompt_parts else None
 
         task_runner = AgentTaskRunner(

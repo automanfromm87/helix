@@ -121,6 +121,14 @@ class SessionRow(Base):
         DateTime(timezone=True), nullable=True
     )
     is_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # When True, context files are NOT dumped into `extra_system_prompt`;
+    # the agent is given the `retrieve` tool and must look things up
+    # explicitly. Useful when the corpus is too large to keep in every
+    # turn's prompt budget. Off by default — dump-mode is faster and
+    # more reliable for small corpora.
+    retrieval_only_context: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     # Files attached to a session — small enough to stay denormalized as JSONB
     # (matches the `Session.files: List[FileInfo]` domain model directly).
     files: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
