@@ -1,3 +1,4 @@
+from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional, List
 from app.interfaces.schemas.event import AgentSSEEvent
@@ -94,3 +95,26 @@ class SharedSessionResponse(BaseModel):
     status: SessionStatus
     events: List[AgentSSEEvent] = []
     is_shared: bool
+
+
+class ContextFileUploadRequest(BaseModel):
+    """Body for `POST /sessions/{id}/context-files`. We accept Markdown
+    text as a plain JSON string — not multipart — because everything we
+    care about is text. The route handler enforces a hard cap on size."""
+
+    filename: str
+    content: str
+
+
+class ContextFileSummary(BaseModel):
+    """List-view shape — excludes `content` because the corpus can be
+    hundreds of KB and the FE list only needs filename + size."""
+
+    id: str
+    filename: str
+    size: int
+    created_at: datetime
+
+
+class ContextFileListResponse(BaseModel):
+    files: List[ContextFileSummary]

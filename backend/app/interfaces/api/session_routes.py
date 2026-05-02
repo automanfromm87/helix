@@ -15,10 +15,11 @@ from app.infrastructure.logging import bind_log_context
 from app.interfaces.dependencies import get_agent_service, get_current_user, get_optional_current_user, get_token_service, verify_signature_websocket
 from app.interfaces.schemas.base import APIResponse
 from app.interfaces.schemas.session import (
-    ChatRequest, ShellViewRequest, CreateSessionRequest, CreateSessionResponse,
+    ChatRequest, ContextFileListResponse, ContextFileSummary,
+    ContextFileUploadRequest, CreateSessionRequest, CreateSessionResponse,
     GetSessionResponse, ListSessionItem, ListSessionResponse, RegenerateRequest,
-    ShellViewResponse, ShareSessionResponse, SharedSessionResponse,
-    UpdateSessionProjectRequest,
+    ShareSessionResponse, SharedSessionResponse, ShellViewRequest,
+    ShellViewResponse, UpdateSessionProjectRequest,
 )
 from app.application.services.project_service import ProjectService
 from app.interfaces.dependencies import get_project_service
@@ -573,6 +574,79 @@ async def get_session_preview_url(
         raise NotFoundError("Session not found")
     url = await agent_service.get_preview_url(session_id)
     return APIResponse.success({"url": url})
+
+
+@router.get(
+    "/{session_id}/context-files",
+    response_model=APIResponse[ContextFileListResponse],
+)
+async def list_context_files(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> APIResponse[ContextFileListResponse]:
+    """List Markdown reference docs attached to this session. The
+    contents themselves are NOT in the response — only filename, size,
+    created_at — to keep the list view light. The agent reads contents
+    server-side at task-creation time."""
+    files = await agent_service.list_context_files(session_id, current_user.id)
+    return APIResponse.success(
+        ContextFileListResponse(
+            files=[
+                ContextFileSummary(
+                    id=f.id,
+                    filename=f.filename,
+                    size=f.size,
+                    created_at=f.created_at,
+                )
+                for f in files
+            ]
+        )
+    )
+
+
+@router.post(
+    "/{session_id}/context-files",
+    response_model=APIResponse[ContextFileSummary],
+)
+async def add_context_file(
+    session_id: str,
+    body: ContextFileUploadRequest,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> APIResponse[ContextFileSummary]:
+    """Attach a Markdown reference document. Body is JSON
+    `{filename, content}`; service-layer enforces size + count caps."""
+    try:
+        cf = await agent_service.add_context_file(
+            session_id, current_user.id, body.filename, body.content,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return APIResponse.success(
+        ContextFileSummary(
+            id=cf.id,
+            filename=cf.filename,
+            size=cf.size,
+            created_at=cf.created_at,
+        )
+    )
+
+
+@router.delete(
+    "/{session_id}/context-files/{file_id}",
+    response_model=APIResponse[None],
+)
+async def delete_context_file(
+    session_id: str,
+    file_id: str,
+    current_user: User = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+) -> APIResponse[None]:
+    await agent_service.remove_context_file(
+        session_id, current_user.id, file_id,
+    )
+    return APIResponse.success(None)
 
 
 @router.post("/{session_id}/vnc/signed-url", response_model=APIResponse[SignedUrlResponse])

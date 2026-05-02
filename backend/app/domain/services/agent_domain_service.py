@@ -126,8 +126,19 @@ class AgentDomainService:
                 return []
             return await self._skill_store.list_for_project(session.project_id)
 
-        project_attachments, global_overrides, project_overrides = await asyncio.gather(
-            _load_attachments(), _load_global_skills(), _load_project_skills(),
+        async def _load_context_files():
+            return await self._session_repository.list_context_files(session.id)
+
+        (
+            project_attachments,
+            global_overrides,
+            project_overrides,
+            context_files,
+        ) = await asyncio.gather(
+            _load_attachments(),
+            _load_global_skills(),
+            _load_project_skills(),
+            _load_context_files(),
         )
 
         skill_repository = self._skill_repository
@@ -137,6 +148,28 @@ class AgentDomainService:
                 global_overrides=global_overrides,
                 project_overrides=project_overrides,
             )
+
+        # Compose the extra system prompt: user-set project-level prompt
+        # plus the per-session reference docs (Markdown attachments). The
+        # docs are appended verbatim under a clear header so the model
+        # can cite filenames back. Order: user-prompt first (carries
+        # tone/role), then reference docs (the agent treats them as
+        # ground truth, not instructions).
+        prompt_parts: list[str] = []
+        if session.system_prompt:
+            prompt_parts.append(session.system_prompt.strip())
+        if context_files:
+            doc_blocks = [
+                f"### {cf.filename}\n\n{cf.content.strip()}"
+                for cf in context_files
+            ]
+            prompt_parts.append(
+                "## Reference documents\n\n"
+                "The user has attached the following documents to this session. "
+                "Treat them as authoritative context.\n\n"
+                + "\n\n---\n\n".join(doc_blocks)
+            )
+        extra_system_prompt = "\n\n".join(prompt_parts) if prompt_parts else None
 
         task_runner = AgentTaskRunner(
             session_id=session.id,
@@ -150,7 +183,7 @@ class AgentDomainService:
             agent_repository=self._repository,
             mcp_repository=self._mcp_repository,
             plan_repository=self._plan_repository,
-            extra_system_prompt=session.system_prompt,
+            extra_system_prompt=extra_system_prompt,
             project_attachments=project_attachments,
             project_repository=self._project_repository,
             project_id=session.project_id,

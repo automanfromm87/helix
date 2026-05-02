@@ -9,6 +9,7 @@ import {
   Link as LinkIcon,
   Lock,
   PanelLeft,
+  Settings2,
 } from 'lucide-react'
 
 import * as agentApi from '@/api/agent'
@@ -36,6 +37,7 @@ import ChatMessage from '@/components/ChatMessage'
 import LoadingIndicator from '@/components/ui/LoadingIndicator'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover'
 import PlanPanel from '@/components/PlanPanel'
+import SessionSettingsDialog from '@/components/SessionSettingsDialog'
 import { ShareIcon } from '@/components/icons'
 import { SimpleBar, type SimpleBarHandle } from '@/components/ui/SimpleBar'
 import ToolPanel, { type ToolPanelHandle } from '@/components/ToolPanel'
@@ -97,6 +99,7 @@ export default function ChatPage() {
   const [shareMode, setShareMode] = useState<'private' | 'public'>('private')
   const [linkCopied, setLinkCopied] = useState(false)
   const [sharingLoading, setSharingLoading] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const lastNoMessageTool = useRef<ToolContent | undefined>()
   const lastTool = useRef<ToolContent | undefined>()
@@ -942,6 +945,13 @@ export default function ChatPage() {
                   </PopoverContent>
                 </Popover>
                 <button
+                  onClick={() => setSettingsOpen(true)}
+                  title="Session settings"
+                  className="p-[5px] flex items-center justify-center hover:bg-[var(--fill-tsp-white-dark)] rounded-lg cursor-pointer"
+                >
+                  <Settings2 className="text-[var(--icon-secondary)]" size={18} />
+                </button>
+                <button
                   onClick={() => showSessionFileList()}
                   className="p-[5px] flex items-center justify-center hover:bg-[var(--fill-tsp-white-dark)] rounded-lg cursor-pointer"
                 >
@@ -1074,6 +1084,11 @@ export default function ChatPage() {
         realTime={realTime}
         isShare={false}
         onJumpToRealTime={jumpToRealTime}
+      />
+      <SessionSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        sessionId={sessionId}
       />
     </SimpleBar>
   )

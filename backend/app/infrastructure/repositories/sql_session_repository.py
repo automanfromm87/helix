@@ -17,9 +17,18 @@ from sqlalchemy.orm import selectinload
 from app.application.errors.exceptions import NotFoundError
 from app.domain.models.event import AgentEvent, BaseEvent, MessageEvent
 from app.domain.models.file import FileInfo
-from app.domain.models.session import Session, SessionStatus, SessionSummary
+from app.domain.models.session import (
+    ContextFile,
+    Session,
+    SessionStatus,
+    SessionSummary,
+)
 from app.domain.repositories.session_repository import SessionRepository
-from app.infrastructure.models.sql import SessionEventRow, SessionRow
+from app.infrastructure.models.sql import (
+    SessionContextFileRow,
+    SessionEventRow,
+    SessionRow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +334,54 @@ class SqlSessionRepository(SessionRepository):
                 raise NotFoundError(f"Session {session_id} not found")
             row.files = [f for f in (row.files or []) if f.get("file_id") != file_id]
             await db.commit()
+
+    async def add_context_file(self, session_id: str, file: ContextFile) -> None:
+        async with self._session_factory() as db:
+            # Insert the row, scoped under the session FK so a session
+            # delete cascades it. We don't pre-check for duplicates by
+            # filename — multiple uploads of the same name are common
+            # (different revisions of a spec); the user can delete the
+            # stale one if it matters.
+            db.add(
+                SessionContextFileRow(
+                    id=file.id,
+                    session_id=session_id,
+                    filename=file.filename,
+                    content=file.content,
+                    size=file.size,
+                    created_at=file.created_at,
+                )
+            )
+            await db.commit()
+
+    async def list_context_files(self, session_id: str) -> List[ContextFile]:
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SessionContextFileRow)
+                .where(SessionContextFileRow.session_id == session_id)
+                .order_by(SessionContextFileRow.created_at.asc())
+            )
+            return [
+                ContextFile(
+                    id=r.id,
+                    filename=r.filename,
+                    content=r.content,
+                    size=r.size,
+                    created_at=r.created_at,
+                )
+                for r in result.scalars().all()
+            ]
+
+    async def remove_context_file(self, session_id: str, file_id: str) -> bool:
+        async with self._session_factory() as db:
+            result = await db.execute(
+                delete(SessionContextFileRow).where(
+                    SessionContextFileRow.session_id == session_id,
+                    SessionContextFileRow.id == file_id,
+                )
+            )
+            await db.commit()
+            return (result.rowcount or 0) > 0
 
     async def get_file_by_path(
         self, session_id: str, file_path: str

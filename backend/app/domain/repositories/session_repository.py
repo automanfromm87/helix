@@ -1,6 +1,11 @@
 from typing import Optional, Protocol, List
 from datetime import datetime
-from app.domain.models.session import Session, SessionStatus, SessionSummary
+from app.domain.models.session import (
+    ContextFile,
+    Session,
+    SessionStatus,
+    SessionSummary,
+)
 from app.domain.models.file import FileInfo
 from app.domain.models.event import BaseEvent, MessageEvent
 
@@ -68,9 +73,23 @@ class SessionRepository(Protocol):
     async def add_file(self, session_id: str, file_info: FileInfo) -> None:
         """Add a file to a session"""
         ...
-    
+
     async def remove_file(self, session_id: str, file_id: str) -> None:
         """Remove a file from a session"""
+        ...
+
+    async def add_context_file(self, session_id: str, file: ContextFile) -> None:
+        """Attach a Markdown reference doc to the session. Lives in
+        `session_context_files`; rendered into the agent's
+        `extra_system_prompt` on every turn."""
+        ...
+
+    async def list_context_files(self, session_id: str) -> List[ContextFile]:
+        """All context files for the session, oldest first."""
+        ...
+
+    async def remove_context_file(self, session_id: str, file_id: str) -> bool:
+        """Detach a context file. Returns True if a row was deleted."""
         ...
 
     async def get_file_by_path(self, session_id: str, file_path: str) -> Optional[FileInfo]:

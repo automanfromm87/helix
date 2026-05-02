@@ -319,3 +319,35 @@ export async function getSharedSessionFiles(sessionId: string): Promise<FileInfo
   )
   return response.data.data
 }
+
+export interface ContextFileSummary {
+  id: string
+  filename: string
+  size: number
+  created_at: string
+}
+
+export async function listContextFiles(sessionId: string): Promise<ContextFileSummary[]> {
+  const r = await apiClient.get<ApiResponse<{ files: ContextFileSummary[] }>>(
+    `/sessions/${sessionId}/context-files`,
+  )
+  return r.data.data.files
+}
+
+export async function uploadContextFile(
+  sessionId: string, filename: string, content: string,
+): Promise<ContextFileSummary> {
+  const r = await apiClient.post<ApiResponse<ContextFileSummary>>(
+    `/sessions/${sessionId}/context-files`,
+    { filename, content },
+  )
+  return r.data.data
+}
+
+export async function deleteContextFile(
+  sessionId: string, fileId: string,
+): Promise<void> {
+  await apiClient.delete<ApiResponse<null>>(
+    `/sessions/${sessionId}/context-files/${fileId}`,
+  )
+}

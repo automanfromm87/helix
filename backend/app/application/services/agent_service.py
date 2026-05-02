@@ -2,7 +2,7 @@ from typing import AsyncGenerator, Optional, List
 import logging
 from datetime import datetime
 from app.application.errors.exceptions import NotFoundError, SandboxUnavailableError
-from app.domain.models.session import Session, SessionSummary
+from app.domain.models.session import ContextFile, Session, SessionSummary
 from app.domain.repositories.session_repository import SessionRepository
 
 from app.interfaces.schemas.session import ShellViewResponse
@@ -764,6 +764,86 @@ class AgentService:
         logger.info(f"Getting files for session {session_id} for user {user_id}")
         session = await self.get_session(session_id, user_id)
         return session.files
+
+    # Hard caps on context-file storage. Picked to keep `extra_system_prompt`
+    # under ~1 MB per turn — Claude's prompt cache works best below that and
+    # users uploading multi-megabyte specs probably want a retrieval tool, not
+    # the full corpus on every turn (will be the next iteration).
+    _CONTEXT_FILE_MAX_SIZE = 256 * 1024  # 256 KB per file
+    _CONTEXT_FILES_MAX_COUNT = 20
+    _CONTEXT_FILES_MAX_TOTAL_SIZE = 2 * 1024 * 1024  # 2 MB per session
+
+    async def list_context_files(
+        self, session_id: str, user_id: str,
+    ) -> List[ContextFile]:
+        """All Markdown reference docs attached to this session."""
+        session = await self._session_repository.find_by_id_and_user_id(
+            session_id, user_id,
+        )
+        if not session:
+            raise NotFoundError("Session not found")
+        return await self._session_repository.list_context_files(session_id)
+
+    async def add_context_file(
+        self, session_id: str, user_id: str, filename: str, content: str,
+    ) -> ContextFile:
+        """Attach a Markdown doc. Validates size + per-session count, then
+        delegates the write. Caller must already have authorized via
+        `find_by_id_and_user_id`."""
+        session = await self._session_repository.find_by_id_and_user_id(
+            session_id, user_id,
+        )
+        if not session:
+            raise NotFoundError("Session not found")
+
+        filename = filename.strip()
+        if not filename:
+            raise ValueError("filename is required")
+        size = len(content.encode("utf-8"))
+        if size == 0:
+            raise ValueError("file is empty")
+        if size > self._CONTEXT_FILE_MAX_SIZE:
+            raise ValueError(
+                f"file too large ({size} bytes; max "
+                f"{self._CONTEXT_FILE_MAX_SIZE})"
+            )
+
+        existing = await self._session_repository.list_context_files(session_id)
+        if len(existing) >= self._CONTEXT_FILES_MAX_COUNT:
+            raise ValueError(
+                f"too many context files (max "
+                f"{self._CONTEXT_FILES_MAX_COUNT})"
+            )
+        total_size = sum(cf.size for cf in existing) + size
+        if total_size > self._CONTEXT_FILES_MAX_TOTAL_SIZE:
+            raise ValueError(
+                f"context files total size exceeded "
+                f"({total_size} > {self._CONTEXT_FILES_MAX_TOTAL_SIZE})"
+            )
+
+        cf = ContextFile(filename=filename, content=content, size=size)
+        await self._session_repository.add_context_file(session_id, cf)
+        logger.info(
+            "Attached context file %s (%d bytes) to session %s",
+            filename, size, session_id,
+        )
+        return cf
+
+    async def remove_context_file(
+        self, session_id: str, user_id: str, file_id: str,
+    ) -> None:
+        """Detach a context file. 404 if either the session or file
+        doesn't exist or doesn't belong to the user."""
+        session = await self._session_repository.find_by_id_and_user_id(
+            session_id, user_id,
+        )
+        if not session:
+            raise NotFoundError("Session not found")
+        ok = await self._session_repository.remove_context_file(
+            session_id, file_id,
+        )
+        if not ok:
+            raise NotFoundError("Context file not found")
     
     async def get_shared_session_files(self, session_id: str) -> List[FileInfo]:
         """Get files for a shared session"""

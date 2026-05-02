@@ -143,6 +143,36 @@ class SessionRow(Base):
     )
 
 
+class SessionContextFileRow(Base):
+    """Per-session reference documents (Markdown notes, specs, API
+    references, etc.) the user attaches via Session Settings. Distinct
+    from `SessionRow.files` (chat-message attachments) and from project
+    Skills (global registry); these are rendered into the agent's
+    `extra_system_prompt` for every turn of this session.
+
+    Stored in a side table rather than a JSONB column on the session row
+    because content can be hundreds of KB; we don't want every session
+    read to drag the full corpus along.
+    """
+
+    __tablename__ = "session_context_files"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    filename: Mapped[str] = mapped_column(String(256), nullable=False)
+    # Markdown content. TEXT (not bytea) — we only accept text uploads.
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
 class SessionEventRow(Base):
     """Append-only log of agent events. One row per emitted event."""
 

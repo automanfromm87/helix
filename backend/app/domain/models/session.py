@@ -7,6 +7,19 @@ from app.domain.models.event import AgentEvent
 from app.domain.models.file import FileInfo
 
 
+class ContextFile(BaseModel):
+    """A user-attached reference document for a session — Markdown notes,
+    specs, API docs. Surfaced into the agent's `extra_system_prompt` so
+    it's available on every turn without burning a tool call.
+    """
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:16])
+    filename: str
+    content: str
+    size: int
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class SessionStatus(str, Enum):
     """Session status enum"""
     PENDING = "pending"
