@@ -42,10 +42,18 @@ class AgentDomainService:
         project_repository: Optional[ProjectRepository] = None,
         skill_repository: Optional[SkillRepository] = None,
         skill_store: Optional[SkillStore] = None,
+        sandbox_registry: Optional["SandboxRegistry"] = None,
     ):
         self._repository = agent_repository
         self._session_repository = session_repository
         self._sandbox_cls = sandbox_cls
+        # Lazy import to avoid a domain → application cycle. The registry
+        # itself only depends on domain types; the import is application-
+        # layer only because that's where the singleton lives in DI.
+        if sandbox_registry is None:
+            from app.application.services.sandbox_registry import SandboxRegistry
+            sandbox_registry = SandboxRegistry(sandbox_cls, session_repository)
+        self._sandbox_registry = sandbox_registry
         self._search_engine = search_engine
         self._task_cls = task_cls
         self._file_storage = file_storage
@@ -54,12 +62,10 @@ class AgentDomainService:
         self._project_repository = project_repository
         self._skill_repository = skill_repository
         self._skill_store = skill_store
-        # Per-session lock prevents the check-and-create race in
-        # `_create_task`: two concurrent `chat()` calls (e.g. an SSE
-        # reconnect happening while the first message is still spinning up
-        # a sandbox) used to each spawn their own container, leaving one
-        # orphaned. Lock granularity is per-session-id so unrelated
-        # sessions still proceed in parallel.
+        # Per-task creation lock — separate from the registry's per-session
+        # sandbox lock. This guards the wider task-creation transaction
+        # (sandbox + browser + agent + skill snapshot), which the registry
+        # alone doesn't cover.
         self._task_creation_locks: dict[str, asyncio.Lock] = {}
         logger.info("AgentDomainService initialization completed")
 
@@ -80,24 +86,11 @@ class AgentDomainService:
         """Create a new agent task. Persists session once at the end so a
         crash mid-creation doesn't leave behind a sandbox_id pointing at a
         container we never finished wiring up."""
-        from app.application.errors.exceptions import SandboxUnavailableError
-
-        sandbox_id = session.sandbox_id
-        sandbox = None
-        if sandbox_id:
-            try:
-                sandbox = await self._sandbox_cls.get(sandbox_id)
-            except SandboxUnavailableError:
-                # Old container is gone — spawn a fresh one rather than
-                # propagating the error. Common after a long restart or
-                # janitor reaping a stale per-session container.
-                logger.info(
-                    "Sandbox %s unreachable; spawning fresh container", sandbox_id,
-                )
-                session.sandbox_id = None
-        if not sandbox:
-            sandbox = await self._sandbox_cls.create(session_id=session.id)
-            session.sandbox_id = sandbox.id
+        # Single entry point for sandbox lifecycle — registry handles
+        # liveness check, dead-container respawn, and the per-session
+        # lock that dedupes against fork's background spawn / preview's
+        # invalidate-and-retry. Rebinds `session.sandbox_id` internally.
+        sandbox = await self._sandbox_registry.ensure_for(session)
         browser = await sandbox.get_browser()
         if not browser:
             logger.error(f"Failed to get browser for Sandbox {session.sandbox_id}")

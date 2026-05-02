@@ -321,13 +321,13 @@ class Sandbox(Protocol):
         ...
     
     @classmethod
-    async def get(cls, id: str) -> 'Sandbox':
-        """Get sandbox by ID
-        
-        Args:
-            id: Sandbox ID
-            
-        Returns:
-            Sandbox instance
+    async def fetch(cls, id: str) -> 'Sandbox':
+        """Live-read a sandbox by ID. Always hits the underlying runtime
+        (docker, k8s, etc.) — no caching at this layer. Raises
+        `SandboxUnavailableError` if the sandbox no longer exists.
+
+        Caching, liveness windows, and per-session deduplication are
+        the `SandboxRegistry`'s job; this method is the registry's
+        single point of truth for "is this sandbox still real?"
         """
         ...

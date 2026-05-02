@@ -12,6 +12,7 @@ from app.domain.services.agent_domain_service import AgentDomainService
 from app.domain.models.event import AgentEvent
 from typing import Type
 from app.domain.models.agent import Agent
+from app.application.services.sandbox_registry import SandboxRegistry
 from app.domain.external.sandbox import Sandbox
 from app.domain.external.search import SearchEngine
 from app.domain.external.file import FileStorage
@@ -42,6 +43,7 @@ class AgentService:
         project_repository: Optional[ProjectRepository] = None,
         skill_repository: Optional[SkillRepository] = None,
         skill_store: Optional[SkillStore] = None,
+        sandbox_registry: Optional[SandboxRegistry] = None,
     ):
         logger.info("Initializing AgentService")
         self._agent_repository = agent_repository
@@ -49,6 +51,14 @@ class AgentService:
         self._file_storage = file_storage
         self._plan_repository = plan_repository
         self._project_repository = project_repository
+        # Single owner of sandbox lifecycle. See sandbox_registry.py for
+        # the why. Falls back to a fresh registry if the caller didn't
+        # wire one (test paths) — but in production both this service
+        # and the domain service must share the same instance, otherwise
+        # they have separate caches and locks and the dedup is gone.
+        self._sandbox_registry = sandbox_registry or SandboxRegistry(
+            sandbox_cls, session_repository,
+        )
         self._agent_domain_service = AgentDomainService(
             self._agent_repository,
             self._session_repository,
@@ -61,6 +71,7 @@ class AgentService:
             project_repository=project_repository,
             skill_repository=skill_repository,
             skill_store=skill_store,
+            sandbox_registry=self._sandbox_registry,
         )
         self._search_engine = search_engine
         self._sandbox_cls = sandbox_cls
@@ -162,13 +173,11 @@ class AgentService:
 
         async def _spawn_sandbox_bg() -> None:
             try:
-                sandbox = await self._sandbox_cls.create(session_id=new_session.id)
-                new_session.sandbox_id = sandbox.id
-                await self._session_repository.save(new_session)
-                logger.info(
-                    "Background-spawned sandbox %s for forked session %s",
-                    sandbox.id, new_session.id,
-                )
+                # Through the registry so concurrent recreate paths
+                # (e.g. user immediately sends a chat message before
+                # this background task finishes) dedup on the per-session
+                # lock instead of double-spawning containers.
+                await self._sandbox_registry.ensure_for(new_session)
             except Exception:
                 logger.exception(
                     "Background sandbox create failed for forked session %s; "
@@ -305,16 +314,25 @@ class AgentService:
 
         if sandbox_id:
             try:
-                sandbox = await self._sandbox_cls.get(sandbox_id)
+                sandbox = await self._sandbox_registry.fetch_unmanaged(sandbox_id)
                 await sandbox.destroy()
                 logger.info(
                     "Destroyed sandbox %s for session %s", sandbox_id, session_id,
+                )
+            except SandboxUnavailableError:
+                # Container already gone (reaper, manual stop, never
+                # spawned). Nothing to destroy — proceed to fs cleanup.
+                logger.info(
+                    "Sandbox %s already gone for session %s",
+                    sandbox_id, session_id,
                 )
             except Exception:
                 logger.exception(
                     "Sandbox destroy failed for session %s (sandbox %s)",
                     session_id, sandbox_id,
                 )
+            finally:
+                self._sandbox_registry.invalidate(sandbox_id)
 
         # Wipe the bind-mount root for this session — both `project/` (the
         # workspace) and any sibling files (logs, etc.) the sandbox image
@@ -575,34 +593,12 @@ class AgentService:
         logger.info("All agents closed successfully")
 
     async def _resolve_or_recreate_sandbox(self, session: Session) -> Sandbox:
-        """Return a live sandbox for `session`, transparently recreating
-        the container if the previously-bound one is gone.
-
-        Background: in local dev a sandbox is just a docker container with
-        no real eviction pressure (`sandbox_ttl_minutes = None` in the
-        default config), but historic sessions may still reference an
-        already-removed container from before that change. Rather than
-        force the user to send a chat message just to wake the panel,
-        spin up a fresh sandbox here, rebind it on the session row, and
-        return it. Same code path as `agent_domain_service._create_task`,
-        consolidated so the file/shell/vnc endpoints don't fail with 503
-        on every navigation.
+        """Thin shim over `SandboxRegistry.ensure_for`. Kept as a method
+        so the file_view / vnc / shell handlers below read clearly; all
+        the lifecycle logic (per-session locking, dead-container
+        detection, respawn) lives in the registry.
         """
-        if session.sandbox_id:
-            try:
-                return await self._sandbox_cls.get(session.sandbox_id)
-            except SandboxUnavailableError:
-                logger.info(
-                    "Session %s sandbox %s gone; spawning replacement",
-                    session.id, session.sandbox_id,
-                )
-        sandbox = await self._sandbox_cls.create(session_id=session.id)
-        session.sandbox_id = sandbox.id
-        # `save` is the canonical session-state write — the SessionRepository
-        # has no narrower update_sandbox_id helper. Same path the chat flow
-        # takes when it rebinds.
-        await self._session_repository.save(session)
-        return sandbox
+        return await self._sandbox_registry.ensure_for(session)
 
     async def shell_view(self, session_id: str, shell_session_id: str, user_id: str) -> ShellViewResponse:
         """View shell session output, ensuring session belongs to the user"""
@@ -615,11 +611,7 @@ class AgentService:
         if not session.sandbox_id:
             raise RuntimeError("Session has no sandbox environment")
         
-        # Get sandbox and shell output
-        sandbox = await self._sandbox_cls.get(session.sandbox_id)
-        if not sandbox:
-            raise RuntimeError("Sandbox environment not found")
-        
+        sandbox = await self._sandbox_registry.ensure_for(session)
         result = await sandbox.view_shell(shell_session_id, console=True)
         if result.success:
             return ShellViewResponse(**result.data)
@@ -630,79 +622,51 @@ class AgentService:
         """Return the `http://localhost:<port>` preview URL for the
         session's dev server, or None if it's not actually reachable.
 
-        Liveness probe: `Sandbox.get` is `@alru_cache`d, so a cached
-        Sandbox object's preview_url may point at a port whose
-        container has since died (or whose vite process crashed). We
-        HEAD the URL with a short timeout to catch that. On probe fail
-        we invalidate the cache and resolve again — if the container's
-        actually gone, `_resolve_or_recreate_sandbox` spins up a
-        replacement so the user doesn't have to chat just to revive a
-        dead preview.
+        Pure read — `lookup_alive` doesn't spawn. The iframe polls this
+        endpoint while warming up; if we created on poll we'd race with
+        chat-warmup's create. The flow is:
+
+          1. Registry verifies the bound container is alive (cache or
+             docker inspect). If it's gone the cache is dropped and we
+             return None — user gets "no preview yet"; whichever route
+             actively wants a sandbox (chat, file_view, vnc) will
+             respawn through `ensure_for_session`.
+          2. HEAD-probe the sandbox's *internal* URL (docker-network
+             IP, container port 5173). Backend's own `localhost` is
+             itself, so probing `localhost:<host_port>` from here
+             always fails even when vite is up; the user's browser
+             reaches that same host port directly because the iframe
+             runs on the host.
+          3. If probe fails, drop the cache entry — could be vite
+             crashed even though container is alive (supervisord will
+             restart it; next poll picks it up) or container died
+             between the registry's last check and now.
         """
         import httpx
 
         logger.info(f"Getting preview URL for session {session_id}")
-        session = await self._session_repository.find_by_id(session_id)
-        if not session:
-            raise NotFoundError("Session not found")
-        if not session.sandbox_id:
+        sandbox = await self._sandbox_registry.lookup_alive(session_id)
+        if sandbox is None:
             return None
+
+        url = getattr(sandbox, "preview_url", None)
+        if not url:
+            return None
+
+        probe_url = getattr(sandbox, "preview_internal_url", None) or url
         try:
-            sandbox = await self._sandbox_cls.get(session.sandbox_id)
-        except SandboxUnavailableError:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                r = await client.head(probe_url)
+                if r.status_code >= 500:
+                    return None
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as e:
             logger.info(
-                "Preview lookup: session %s sandbox %s gone, recreating",
-                session_id, session.sandbox_id,
+                "Preview probe: session %s url %s unreachable (%s)",
+                session_id, probe_url, type(e).__name__,
             )
-            sandbox = await self._resolve_or_recreate_sandbox(session)
-
-        url = getattr(sandbox, "preview_url", None)
-        if not url:
+            self._sandbox_registry.invalidate(sandbox.id)
             return None
-
-        async def _probe(target: str) -> bool:
-            # Probe using the sandbox's docker-network IP, not the host-facing
-            # URL. Backend container's `localhost` is itself, so probing
-            # `localhost:<host_port>` always fails even when vite is up
-            # inside the sandbox.
-            try:
-                async with httpx.AsyncClient(timeout=1.5) as client:
-                    r = await client.head(target)
-                    return r.status_code < 500
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError):
-                return False
-
-        probe_url = getattr(sandbox, "preview_internal_url", None) or url
-        if await _probe(probe_url):
-            return url
-
-        # Probe failed — could be (a) cached Sandbox object pointing at a
-        # dead container, or (b) vite crashed inside a live container.
-        # Drop the cache entry; `_resolve_or_recreate_sandbox` will hit
-        # docker fresh, raise SandboxUnavailableError if (a), and spawn a
-        # replacement. For (b) we get the same Sandbox back and the
-        # second probe still fails — supervisord will restart vite on its
-        # own, just not in time for this request.
-        logger.info(
-            "Preview probe: session %s url %s unreachable, retrying after cache flush",
-            session_id, probe_url,
-        )
-        try:
-            self._sandbox_cls.get.cache_invalidate(session.sandbox_id)
-        except Exception:
-            pass
-        try:
-            sandbox = await self._resolve_or_recreate_sandbox(session)
-        except Exception as e:
-            logger.info("Preview recreate failed for session %s: %s", session_id, e)
-            return None
-        url = getattr(sandbox, "preview_url", None)
-        if not url:
-            return None
-        probe_url = getattr(sandbox, "preview_internal_url", None) or url
-        if await _probe(probe_url):
-            return url
-        return None
+        return url
 
     async def get_vnc_url(self, session_id: str) -> str:
         """Get VNC URL for a session, ensuring it belongs to the user.

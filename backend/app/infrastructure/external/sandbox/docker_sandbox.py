@@ -6,7 +6,7 @@ import socket
 import logging
 import asyncio
 import io
-from async_lru import alru_cache
+from async_lru import alru_cache  # only used for DNS resolution caching
 from app.core.config import get_settings
 from app.application.errors.exceptions import SandboxUnavailableError
 from app.domain.models.tool_result import ToolResult
@@ -767,26 +767,30 @@ class DockerSandbox(Sandbox):
         return reaped
 
     @classmethod
-    @alru_cache(maxsize=128, typed=True, ttl=10.0)
-    async def get(cls, id: str) -> Sandbox:
-        """Get sandbox by ID. Raises `SandboxUnavailableError` (→ 503 to FE)
-        when the container is gone — common after switching dev modes,
-        cleaning the janitor, or simply because the operator stopped it.
+    async def fetch(cls, id: str) -> Sandbox:
+        """Live-read a sandbox by ID — always hits the docker daemon
+        (~5ms inspect call). Raises `SandboxUnavailableError` (→ 503 to
+        FE) when the container is gone.
 
-        Cache TTL is 10s: long enough to absorb hot-path bursts (file_view,
-        chat-loop polling) without thrashing docker, short enough that if a
-        container does die out-of-band, `_resolve_or_recreate_sandbox`
-        sees the SandboxUnavailableError on the next miss and respawns
-        rather than handing back stale IPs forever."""
+        Pre-registry this method was `@alru_cache`'d, which silently
+        handed back Sandbox objects whose IPs pointed at long-dead
+        containers; now caching is the registry's job and this method
+        guarantees freshness. Sync docker SDK calls go through a thread
+        so the event loop isn't blocked on the (rare) slow inspect.
+        """
         settings = get_settings()
         if settings.sandbox_address:
             ip = await cls._resolve_hostname_to_ip(settings.sandbox_address)
             return DockerSandbox(ip=ip, container_name=id)
 
-        try:
-            docker_client = docker.from_env()
-            container = docker_client.containers.get(id)
+        def _inspect():
+            client = docker.from_env()
+            container = client.containers.get(id)
             container.reload()
+            return container
+
+        try:
+            container = await asyncio.to_thread(_inspect)
         except docker.errors.NotFound as exc:
             logger.info("sandbox container not found id=%s", id)
             raise SandboxUnavailableError(
@@ -800,7 +804,6 @@ class DockerSandbox(Sandbox):
 
         ip_address = cls._get_container_ip(container)
         preview_port = cls._extract_dev_server_port(container)
-        logger.info(f"IP address: {ip_address}")
         return DockerSandbox(
             ip=ip_address,
             container_name=id,

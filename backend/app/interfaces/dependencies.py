@@ -104,6 +104,21 @@ def get_skill_store() -> SqlSkillRepository:
 
 
 @lru_cache()
+def get_sandbox_registry() -> "SandboxRegistry":
+    """Process-wide singleton. Both AgentService and AgentDomainService
+    must share the same instance — distinct registries would defeat the
+    per-session lock (each would think it's the only one creating).
+    """
+    from app.application.services.sandbox_registry import SandboxRegistry
+
+    logger.info("Creating SandboxRegistry instance")
+    return SandboxRegistry(
+        sandbox_cls=DockerSandbox,
+        session_repository=get_session_repository(),
+    )
+
+
+@lru_cache()
 def get_agent_service() -> AgentService:
     logger.info("Creating AgentService instance")
     return AgentService(
@@ -118,6 +133,7 @@ def get_agent_service() -> AgentService:
         project_repository=get_project_repository(),
         skill_repository=get_skill_repository(),
         skill_store=get_skill_store(),
+        sandbox_registry=get_sandbox_registry(),
     )
 
 
