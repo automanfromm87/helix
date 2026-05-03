@@ -27,7 +27,11 @@
     "baseUrl": ".",
     "paths": { "@/*": ["src/*"] },
 
-    "types": ["vitest/globals", "@testing-library/jest-dom"]
+    // `vite/client` brings in `ImportMeta.env` typing for `import.meta.env.DEV`
+    // and friends. Skipping it makes any `.env`/`import.meta.env.*` access
+    // a TS2339 error. The other entries enable jest-dom matcher types and
+    // vitest's global describe/it/expect.
+    "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"]
   },
   "include": ["src"],
   "references": [{ "path": "./tsconfig.node.json" }]

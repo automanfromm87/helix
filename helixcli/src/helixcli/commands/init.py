@@ -114,6 +114,10 @@ def _scaffold_frontend(project_root: Path, *, project_name: str) -> list[str]:
         ("web/tsconfig.json.j2", "tsconfig.json"),
         ("web/tsconfig.node.json.j2", "tsconfig.node.json"),
         ("web/vite.config.ts.j2", "vite.config.ts"),
+        # Vitest config is split out so vite.config.ts can use vite's
+        # `defineConfig` (clean Plugin types) without fighting vitest's
+        # version-drifting Plugin types.
+        ("web/vitest.config.ts.j2", "vitest.config.ts"),
         ("web/eslint.config.js.j2", "eslint.config.js"),
         ("web/index.html.j2", "index.html"),
         ("web/.gitignore.j2", ".gitignore"),

@@ -7,9 +7,19 @@
     "skipLibCheck": true,
 
     "strict": true,
-    "noEmit": true,
     "isolatedModules": true,
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+
+    // `composite` + an emit target are required for project references
+    // (the root tsconfig.json references this one). The .tsbuildinfo
+    // file is the build cache; gitignored at the repo root.
+    "composite": true,
+    "noEmit": false,
+    "outDir": "./node_modules/.tmp/tsconfig-node-out",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig-node.tsbuildinfo",
+
+    // `node:url`, `process`, etc. used in vite.config.ts.
+    "types": ["node"]
   },
-  "include": ["vite.config.ts"]
+  "include": ["vite.config.ts", "vitest.config.ts"]
 }

@@ -1,0 +1,21 @@
+// Vitest config split from vite.config.ts so the build-only path can
+// import `defineConfig` from `vite` (clean Plugin types) without the
+// vitest/config Plugin-type drift forcing an `as any` cast.
+//
+// `mergeConfig` overlays the test settings on top of the Vite config
+// so plugins / aliases / etc. stay in sync — no copy-paste.
+import { mergeConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
+
+import viteConfig from './vite.config'
+
+export default mergeConfig(
+  viteConfig,
+  defineConfig({
+    test: {
+      globals: true,
+      environment: 'jsdom',
+      setupFiles: ['./src/test-setup.ts'],
+    },
+  }),
+)
