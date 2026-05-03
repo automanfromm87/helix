@@ -389,11 +389,18 @@ class SqlSessionRepository(SessionRepository):
     async def get_file_by_path(
         self, session_id: str, file_path: str
     ) -> Optional[FileInfo]:
+        # Only select `files` so this doesn't trigger the SessionRow.events
+        # selectin-load that drags every event of the session along. On a
+        # long session that meant thousands of unnecessary rows on what
+        # should be a JSON column lookup.
         async with self._session_factory() as db:
-            row = await db.get(SessionRow, session_id)
-            if not row:
+            stmt = select(SessionRow.files).where(SessionRow.session_id == session_id)
+            result = await db.execute(stmt)
+            row = result.first()
+            if row is None:
                 raise NotFoundError(f"Session {session_id} not found")
-            for f in row.files or []:
+            files_json = row[0] or []
+            for f in files_json:
                 if f.get("file_path") == file_path:
                     return FileInfo.model_validate(f)
             return None

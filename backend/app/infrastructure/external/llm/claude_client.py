@@ -36,6 +36,31 @@ logger = logging.getLogger(__name__)
 CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
 
 
+# Process-wide cap on concurrent LLM calls. Without this, a burst of
+# parallel sessions (e.g. fork-many spawning N variants) all hammer the
+# upstream simultaneously and saturate the per-account RPM/TPM limits.
+# Each individual call already has retry-with-backoff via protection.py;
+# the semaphore is the coordination layer that smooths the burst itself.
+#
+# Sized so a small fleet of sessions can chat in parallel but a runaway
+# spawn doesn't blow past the rate limit. Override via env var
+# `LLM_MAX_CONCURRENCY` — see core/config.py.
+_LLM_CONCURRENCY: Optional[asyncio.Semaphore] = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    """Lazy-init the semaphore on first use so it binds to the running event
+    loop (creating it at import time would attach to the wrong loop in
+    tests / multi-loop setups)."""
+    global _LLM_CONCURRENCY
+    if _LLM_CONCURRENCY is None:
+        settings = get_settings()
+        cap = max(1, getattr(settings, "llm_max_concurrency", 8))
+        _LLM_CONCURRENCY = asyncio.Semaphore(cap)
+        logger.info("LLM concurrency semaphore: %d slots", cap)
+    return _LLM_CONCURRENCY
+
+
 def _build_async_http_client(
     proxy_address: str, timeout_seconds: float
 ) -> httpx.AsyncClient:
@@ -112,11 +137,13 @@ async def complete(
         params["temperature"] = settings.temperature
 
     started = time.monotonic()
-    try:
-        resp = await api_call(**params)
-    except Exception as exc:
-        await _record_error(params["model"], started, exc)
-        raise
+    sem = _get_llm_semaphore()
+    async with sem:
+        try:
+            resp = await api_call(**params)
+        except Exception as exc:
+            await _record_error(params["model"], started, exc)
+            raise
 
     latency_ms = int((time.monotonic() - started) * 1000)
     payload = resp.model_dump() if hasattr(resp, "model_dump") else dict(resp)
@@ -199,6 +226,7 @@ async def complete_stream(
     idle_timeout = settings.llm_stream_idle_timeout
     first_byte_timeout = settings.llm_stream_first_byte_timeout
     total_timeout = settings.llm_stream_total_timeout
+    sem = _get_llm_semaphore()
     # Don't repeatedly join the chunk list — quadratic on large outputs.
     # Consumers that need the prefix can compute it themselves; emitting the
     # incremental chunk is enough for streamed UI rendering.
@@ -216,7 +244,13 @@ async def complete_stream(
     #     diagnose. asyncio.timeout cancels the whole try block from the
     #     outside; AsyncExitStack ensures the underlying stream is closed.
     try:
-        async with asyncio.timeout(total_timeout):
+        # Acquire the LLM semaphore for the lifetime of the stream — held
+        # across all yielded chunks, released only when the generator
+        # finishes / errors / is cancelled. This is what actually smooths
+        # the burst (a streaming call can hold a slot for tens of seconds
+        # so capping concurrent streams matters more than capping
+        # one-shots).
+        async with sem, asyncio.timeout(total_timeout):
             async with AsyncExitStack() as stack:
                 try:
                     stream = await asyncio.wait_for(

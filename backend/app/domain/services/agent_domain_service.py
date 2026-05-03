@@ -376,7 +376,23 @@ class AgentDomainService:
             # closes the stream cleanly afterwards.
             logger.exception(f"Error in Session {session_id}")
             event = ErrorEvent(error=str(e) or type(e).__name__)
-            await self._session_repository.add_event(session_id, event)
+            try:
+                await self._session_repository.add_event(session_id, event)
+            except Exception:
+                # If the DB itself just failed (the most likely reason we hit
+                # this except path), the add_event will fail too. Don't shadow
+                # the original error — log and move on so we still emit the
+                # ErrorEvent over SSE.
+                logger.exception("Failed to persist ErrorEvent for %s", session_id)
             yield event
         finally:
-            await self._session_repository.update_unread_message_count(session_id, 0)
+            # Best-effort cleanup. Ignored on cancellation / DB-down so the
+            # finally doesn't raise its own error and clobber whatever was
+            # propagating.
+            try:
+                await self._session_repository.update_unread_message_count(session_id, 0)
+            except Exception:
+                logger.warning(
+                    "Failed to clear unread count for %s on chat finally",
+                    session_id, exc_info=True,
+                )

@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # observed legitimate latency (long generation on a freshly-cached
     # huge prompt) so it never fires on a healthy call.
     llm_stream_total_timeout: float = 300.0  # seconds
+    # Process-wide cap on concurrent LLM calls (one-shots + streaming).
+    # Coordinates burst behaviour across sessions so a fork-many run
+    # doesn't blow past the per-account RPM/TPM. Set near the per-account
+    # concurrency cap of the upstream model service. 8 is a conservative
+    # default; bump for higher-tier accounts.
+    llm_max_concurrency: int = 8
 
     # Model configuration
     model_name: str = "claude-opus-4-7"
