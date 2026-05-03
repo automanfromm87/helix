@@ -43,7 +43,6 @@ export default function ToolPanelContent({
 }: Props) {
   const toolInfo = useToolInfo(toolContent)
   const View = toolInfo?.View
-  const Icon = toolInfo?.Icon
 
   /** Dropdown options in stable, human-friendly order.
    *

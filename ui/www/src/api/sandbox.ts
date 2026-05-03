@@ -1,5 +1,5 @@
 import { apiClient, API_CONFIG, type ApiResponse } from './client'
-import type { ShellViewResponse, SignedUrlResponse } from '@/types/response'
+import type { SignedUrlResponse } from '@/types/response'
 
 /**
  * Sandbox-side endpoints: signed URLs for the VNC websocket forward and
@@ -60,13 +60,3 @@ export const getShellStreamUrl = async (
   return `${wsBase}${signed.signed_url}`
 }
 
-export async function viewShellSession(
-  sessionId: string,
-  shellSessionId: string,
-): Promise<ShellViewResponse> {
-  const response = await apiClient.post<ApiResponse<ShellViewResponse>>(
-    `/sessions/${sessionId}/shell`,
-    { session_id: shellSessionId },
-  )
-  return response.data.data
-}

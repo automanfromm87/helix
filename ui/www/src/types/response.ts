@@ -65,18 +65,6 @@ export interface ListSessionResponse {
   sessions: ListSessionItem[]
 }
 
-export interface ConsoleRecord {
-  ps1: string
-  command: string
-  output: string
-}
-
-export interface ShellViewResponse {
-  output: string
-  session_id: string
-  console: ConsoleRecord[]
-}
-
 export interface FileViewResponse {
   content: string
   file: string

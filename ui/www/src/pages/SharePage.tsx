@@ -46,7 +46,6 @@ export default function SharePage() {
   const [replayCompleted, setReplayCompleted] = useState(false)
 
   const lastNoMessageTool = useRef<ToolContent | undefined>()
-  const lastTool = useRef<ToolContent | undefined>()
   const lastEventId = useRef<string | undefined>()
   const jumpToEnd = useRef(false)
   // Monotonic token incremented every time replay() is called. The async
@@ -67,7 +66,6 @@ export default function SharePage() {
     (data: ToolEventData) => {
       const tool: ToolContent = { ...data }
       setMessages((prev) => reduceTool(prev, data))
-      lastTool.current = tool
       if (tool.name !== 'message') {
         lastNoMessageTool.current = tool
         if (realTime) toolPanel.current?.showToolPanel(tool, false)
@@ -137,7 +135,6 @@ export default function SharePage() {
     setMessages([])
     setPlan(undefined)
     setTitle('New Chat')
-    lastTool.current = undefined
     lastNoMessageTool.current = undefined
     lastEventId.current = undefined
     jumpToEnd.current = false

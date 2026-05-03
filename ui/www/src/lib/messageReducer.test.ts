@@ -6,7 +6,7 @@ import type {
   TaskEventData,
   ToolEventData,
 } from '@/types/event'
-import type { Message, TaskContent, ToolContent } from '@/types/message'
+import type { Message, TaskContent } from '@/types/message'
 
 import {
   reduceAppendUserAttachments,

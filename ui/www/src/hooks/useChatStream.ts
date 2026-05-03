@@ -92,7 +92,6 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
   const [shareMode, setShareMode] = useState<'private' | 'public'>('private')
 
   const lastNoMessageTool = useRef<ToolContent | undefined>()
-  const lastTool = useRef<ToolContent | undefined>()
   const lastEventId = useRef<string | undefined>()
   const chatHandleRef = useRef<{ cancel: () => void } | null>(null)
   // Sync flag tracking whether a chat() invocation is already in flight.
@@ -123,7 +122,6 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
   const handleToolEvent = useCallback((data: ToolEventData) => {
     const tool: ToolContent = { ...data }
     setMessages((prev) => reduceTool(prev, data))
-    lastTool.current = tool
     if (tool.name !== 'message') {
       lastNoMessageTool.current = tool
       if (realTimeRef.current) toolPanelRef.current?.showToolPanel(tool, true)
@@ -292,7 +290,6 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
       // truncates server-side.
       setMessages((prev) => reduceTruncateAtUserEvent(prev, eventId))
       lastEventId.current = ''
-      lastTool.current = undefined
       lastNoMessageTool.current = undefined
       try {
         await agentApi.regenerateFromMessage(sessionId, eventId, newMessage)
@@ -403,7 +400,6 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
     setShareMode('private')
     setRealTime(true)
     setAwaitingReply(false)
-    lastTool.current = undefined
     lastNoMessageTool.current = undefined
     lastEventId.current = undefined
     toolPanelRef.current?.hideToolPanel()

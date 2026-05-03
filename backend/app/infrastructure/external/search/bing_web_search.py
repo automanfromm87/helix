@@ -159,23 +159,3 @@ class BingWebSearchEngine(SearchEngine):
                 message=f"Bing Web Search failed: {e}",
                 data=error_results,
             )
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    async def test():
-        engine = BingWebSearchEngine()
-        result = await engine.search("Python programming")
-
-        if result.success:
-            print(f"Found {len(result.data.results)} results")
-            for i, item in enumerate(result.data.results[:5]):
-                print(f"{i + 1}. {item.title}")
-                print(f"   {item.link}")
-                print(f"   {item.snippet[:100]}")
-                print()
-        else:
-            print(f"Search failed: {result.message}")
-
-    asyncio.run(test())

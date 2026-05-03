@@ -44,13 +44,11 @@ export default function PreviewToolView({ sessionId }: ToolViewProps) {
   const [url, setUrl] = useState<string | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
-  const [fetching, setFetching] = useState(false)
   const [inspecting, setInspecting] = useState(false)
   const autoRefetchedRef = useRef(false)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
 
   const fetchUrl = useCallback(async () => {
-    setFetching(true)
     try {
       const r = await apiClient.get<ApiResponse<{ url: string | null }>>(
         `/sessions/${sessionId}/preview`,
@@ -61,8 +59,6 @@ export default function PreviewToolView({ sessionId }: ToolViewProps) {
     } catch (e) {
       console.error('preview url fetch failed', e)
       setUrl(null)
-    } finally {
-      setFetching(false)
     }
   }, [sessionId])
 
