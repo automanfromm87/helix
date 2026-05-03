@@ -1,0 +1,31 @@
+# Node / npm
+node_modules/
+dist/
+.npm/
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Env files (commit only .env.example)
+.env
+.env.local
+.env.*.local
+
+# DB
+*.db
+*.db-journal
+
+# helixcli runtime state — pids + logs from `helixcli up`. The
+# manifest stays committed.
+.helix/pids/
+.helix/logs/

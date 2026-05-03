@@ -33,7 +33,7 @@ Status: **draft for review**, not implemented yet.
 | Frontend styling | Tailwind v4 (`@tailwindcss/vite`, no `tailwind.config.js`) | `react-vite-typescript` §2c |
 | Frontend lint | ESLint 9 flat config | `react-vite-typescript` §5 |
 | Frontend test | Vitest + Testing Library | `react-testing` |
-| Frontend pkgmgr | pnpm (REQUIRED — no npm fallback, fail fast if missing) | `react-vite-typescript` §1 + decision §8.5 |
+| Frontend pkgmgr | npm (workspace mode at project root) | decision §8.5 — pnpm 10's lifecycle-script policy fought every fresh scaffold |
 | Backend framework | FastAPI + Pydantic v2 | `uv-fastapi-python` |
 | Backend pkgmgr | uv (Python 3.12+) | `uv-fastapi-python` |
 | Backend ORM | SQLAlchemy 2.0 async + Alembic | `uv-fastapi-python` §6 |
@@ -96,7 +96,8 @@ project/
 │                         # knows how to consume it.
 ├── README.md
 ├── .gitignore
-└── pnpm-workspace.yaml   # only when frontend exists
+└── package.json          # npm workspace root, only when frontend exists
+                          # (lists apps/web in `workspaces`)
 ```
 
 `apps/web/src/` mirrors what the React skill §6 prescribes.
@@ -146,9 +147,14 @@ of the project instead of having to grep.
 
 ## 4. Generators (initial surface)
 
-Four commands. **Do not pre-build more.** Add a generator only when
-real usage shows the agent producing inconsistent output for that
-operation.
+Four code-generators + three lifecycle helpers. **Do not pre-build
+more code-generators.** Add one only when real usage shows the agent
+producing inconsistent output for that operation.
+
+Lifecycle helpers (`install`, `up`, `down`) are not generators —
+they don't write files into the project tree. They exist because the
+agent shouldn't have to remember `cd apps/web && npm install && ...`
+incantations either.
 
 ### `helixcli init [name] [flags]`
 
@@ -159,25 +165,24 @@ What it does:
 1. Refuse if `.helix/manifest.json` already exists (unless `--force`).
    Don't bother checking for unrelated stray files — by design the
    sandbox is agent-only and the agent should call `init` first.
-2. Refuse if `pnpm` isn't on `$PATH` (frontend path). No silent fallback
-   to npm — keeps lockfiles deterministic across runs.
+2. Refuse if `npm` isn't on `$PATH` (frontend path).
 3. `git init` if no `.git` exists.
-4. Run the frontend scaffold (`pnpm create vite . --template react-swc-ts` →
-   tighten tsconfig per skill §3 → wire Tailwind v4 → drop in
-   `helix-inspector.ts` per skill §2e → install ESLint config) into
-   `apps/web/`.
-5. Run the backend scaffold (`uv init --app --python 3.12` → install
-   the FastAPI dep set per skill §2b → drop in the `app/main.py` from
-   skill §4 → init Alembic) into `apps/api/`.
-6. If both apps exist: add `apps/web/package.json` script
-   `"gen:types": "openapi-typescript http://localhost:8000/openapi.json -o src/api-types.ts"`,
-   install `openapi-typescript` as a dev dep. The agent runs it on
-   demand; helixcli doesn't auto-call it.
+4. Render the frontend templates (tsconfig per skill §3, Vite config
+   with Tailwind v4 per §2c, ESLint flat config per §5,
+   `helix-inspector.ts` per §2e) into `apps/web/`. We don't shell
+   out to `npm create vite` — outputs aren't byte-stable across
+   versions, defeating the determinism premise.
+5. Render the backend templates (`pyproject.toml` per skill §3,
+   `app/main.py` per §4, alembic env per §6) into `apps/api/`.
+6. If both apps exist: emit a root `package.json` with
+   `workspaces: ["apps/web"]` and add a `gen:types` script in
+   `apps/web/package.json` (`openapi-typescript` against
+   `/openapi.json`). The agent runs it on demand.
 7. Write `.helix/manifest.json` reflecting the chosen stack.
 8. Write `.helix/README.md` (human overview).
 9. `git add . && git commit -m "helixcli init"`.
 
-Exit codes: `0` ok, `64` already initialised, `65` pnpm missing,
+Exit codes: `0` ok, `64` already initialised, `65` npm missing,
 `70` internal failure. Output: JSON to stdout —
 `{"created": [...paths], "manifest": {...}}` — so the tool wrapper can
 parse it without grepping.
@@ -221,6 +226,30 @@ the agent reason about pending work).
 Why a wrapper instead of letting the agent run alembic directly:
 predictable cwd, predictable env, no "where is alembic.ini?" thinking
 on the agent side.
+
+### `helixcli install`
+
+Lifecycle helper. Runs `npm install` at the project root (the npm
+workspace covers `apps/web`) and `uv sync` in `apps/api/`, gated by
+what the manifest says exists. Streams install logs through to the
+user's terminal so peer-dep / lockfile errors are visible. Returns a
+JSON list of steps with their exit codes.
+
+### `helixcli up` / `helixcli down`
+
+Host-side dev-server supervision. `up` spawns
+`npm run dev --workspace apps/web` and/or `uv run fastapi dev`
+detached (new session, so the helixcli process exiting doesn't take
+them with it), records PIDs in `.helix/pids/<app>.pid`, redirects
+logs to `.helix/logs/<app>.log`. Idempotent — already-running servers
+are reported as such, not double-spawned.
+
+`down` SIGTERMs each PID's process group (so node / uvicorn children
+exit cleanly), waits up to 5s, then SIGKILLs anything still alive.
+
+In the production helix sandbox, supervisord owns the dev servers and
+helixcli `up` / `down` should NOT be used — these are for host-side
+testing.
 
 ---
 
@@ -308,17 +337,22 @@ numbering so any earlier reference still resolves.)
    that work in the CLI.
 3. **No sample tests on `init`.** The scaffolded stack is the
    authoritative reference; we don't need a smoke-test that just
-   re-asserts the framework works. `pnpm test` and `pytest` start
-   green-but-empty until the agent adds a real test.
+   re-asserts the framework works. `npm test --workspace apps/web` and
+   `pytest` start green-but-empty until the agent adds a real test.
 4. **Non-empty target — refuse if `.helix/manifest.json` exists.
    Otherwise proceed.** The sandbox is agent-only and the agent calls
    `init` first by convention; we don't need to scan for unrelated
    stray files. The `--force` flag is for the manifest case (the rare
    "re-init from scratch") only.
-5. **pnpm required, no npm fallback.** A silent fallback would let
-   two runs on different machines produce different lockfiles, which
-   contradicts the determinism premise (§0). Sandbox image must ship
-   pnpm; `init` exits 65 if it's missing.
+5. **npm, not pnpm.** Originally we picked pnpm for speed, but pnpm
+   10's lifecycle-script policy (postinstalls disabled by default,
+   re-enable list scattered across `package.json` and
+   `pnpm-workspace.yaml`) made `pnpm install` exit 1 on a vanilla
+   Vite + Tailwind v4 scaffold even with the right whitelist
+   entries. npm has no equivalent gate, lockfile is in one place, and
+   the install speed difference doesn't matter for our
+   write-once-per-task workload. Sandbox image must ship Node 20+
+   (which carries npm); `init` exits 65 if it's missing.
 
 ---
 

@@ -1,0 +1,14 @@
+"""Tests for the {{ resource }} resource."""
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_{{ handler_name }}(client: AsyncClient) -> None:
+    response = await client.{{ method_lower }}(
+        "{{ path }}"{% if has_body %},
+        json={"placeholder": "test"}{% endif %}
+    )
+    # The handler returns a placeholder response by default; tighten
+    # this test once the implementation is real.
+    assert response.status_code in (200, 201)

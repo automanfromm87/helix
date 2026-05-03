@@ -1,0 +1,7 @@
+@pytest.mark.asyncio
+async def test_{{ handler_name }}(client: AsyncClient) -> None:
+    response = await client.{{ method_lower }}(
+        "{{ path }}"{% if has_body %},
+        json={"placeholder": "test"}{% endif %}
+    )
+    assert response.status_code in (200, 201)

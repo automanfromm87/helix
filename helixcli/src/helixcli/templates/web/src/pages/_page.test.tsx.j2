@@ -1,0 +1,13 @@
+import { render, screen } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
+
+import {{ name }} from './{{ name }}'
+
+describe('{{ name }}', () => {
+  it('renders its heading', () => {
+    render(<{{ name }} />)
+    expect(
+      screen.getByRole('heading', { name: '{{ name }}' }),
+    ).toBeInTheDocument()
+  })
+})

@@ -1,0 +1,11 @@
+"""Health check — distinct from the unauthenticated /health on the
+app root because routers under /api/v1/ inherit the prefix. Keeps both
+working."""
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/health", tags=["health"])
+
+
+@router.get("")
+async def api_health() -> dict[str, str]:
+    return {"status": "ok"}

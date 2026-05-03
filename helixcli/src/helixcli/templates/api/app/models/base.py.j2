@@ -1,0 +1,7 @@
+"""Single declarative Base shared by every model. Alembic's env.py
+imports `Base.metadata` from here for autogenerate."""
+from sqlalchemy.orm import DeclarativeBase
+
+
+class Base(DeclarativeBase):
+    pass

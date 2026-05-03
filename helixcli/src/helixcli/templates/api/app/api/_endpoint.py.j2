@@ -1,0 +1,17 @@
+"""{{ resource | title }} endpoints."""
+from fastapi import APIRouter
+{% if has_body %}
+from app.schemas.{{ resource }} import {{ schema_class }}Request, {{ schema_class }}Response
+{% endif %}
+
+router = APIRouter(prefix="/{{ resource }}", tags=["{{ resource }}"])
+
+
+@router.{{ method_lower }}("{{ rel_path }}"{% if has_body %}, response_model={{ schema_class }}Response{% endif %})
+async def {{ handler_name }}({% if has_body %}body: {{ schema_class }}Request{% endif %}){% if has_body %} -> {{ schema_class }}Response{% else %} -> dict[str, str]{% endif %}:
+    """TODO: implement {{ method }} {{ path }}."""
+{% if has_body %}
+    return {{ schema_class }}Response(message="not implemented")
+{% else %}
+    return {"status": "not implemented"}
+{% endif %}

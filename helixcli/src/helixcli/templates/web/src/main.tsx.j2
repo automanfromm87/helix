@@ -1,0 +1,19 @@
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+
+import './index.css'
+import App from './App'
+
+// Helix preview inspector — dev-only. The host's "Inspect" button
+// posts inspect:on/off; the helper reads React's _debugSource and
+// posts the click target's component + source location back. See
+// helix-inspector.ts for details.
+if (import.meta.env.DEV) {
+  void import('./helix-inspector')
+}
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)

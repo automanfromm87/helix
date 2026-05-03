@@ -1,0 +1,37 @@
+"""SQLAlchemy 2.0 async engine + session factory. Engine is created
+once in lifespan() and disposed on shutdown; each request gets its
+own session, never its own engine."""
+from typing import Optional
+
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+_engine: Optional[AsyncEngine] = None
+_session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+
+
+async def init_engine(url: str) -> None:
+    global _engine, _session_factory
+    _engine = create_async_engine(url, pool_pre_ping=True)
+    # expire_on_commit=False is mandatory for async — without it,
+    # accessing attributes after commit() triggers a refresh query
+    # that fails because the session is no longer bound.
+    _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+
+
+async def close_engine() -> None:
+    global _engine, _session_factory
+    if _engine is not None:
+        await _engine.dispose()
+    _engine = None
+    _session_factory = None
+
+
+def session_factory() -> async_sessionmaker[AsyncSession]:
+    if _session_factory is None:
+        raise RuntimeError("init_engine() not called — check lifespan wiring")
+    return _session_factory

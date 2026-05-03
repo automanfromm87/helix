@@ -1,0 +1,25 @@
+# .helix/
+
+State directory for [helixcli](https://github.com/automanfromm87/helix).
+**Don't edit by hand** — generators read and rewrite this on every call.
+
+## Files
+
+- `manifest.json` — authoritative project map. Lists routes, endpoints,
+  models that helixcli knows about. The agent (and the Helix backend)
+  reads this to seed planning context.
+- `README.md` — this file.
+
+## Stack
+
+- Frontend: `{{ manifest.stack.frontend or "(none)" }}`
+- Backend: `{{ manifest.stack.backend or "(none)" }}`
+- Database: `{{ manifest.stack.database or "(none)" }}`
+
+## Commands available
+
+```
+helixcli page <Name>                          add a frontend page
+helixcli endpoint <METHOD> <path>             add a backend endpoint
+helixcli migration <name>                     alembic revision wrapper
+```

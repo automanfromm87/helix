@@ -1,0 +1,30 @@
+# {{ project_name }}
+
+Scaffolded by [helixcli](https://github.com/automanfromm87/helix).
+
+## Layout
+
+```
+apps/web/   — Vite + React 19 + TS + Tailwind v4 (frontend)
+apps/api/   — uv + FastAPI + Pydantic v2 + SQLAlchemy 2 async (backend)
+.helix/     — manifest + helixcli state. Don't edit by hand.
+```
+
+## Commands
+
+```bash
+# One-shot: deps for both apps + start both dev servers in background
+helixcli install
+helixcli up      # http://localhost:5173 + http://localhost:8000
+helixcli down    # stop them
+
+# Or by hand
+npm install                                       # workspace root
+npm run dev --workspace apps/web                  # frontend
+( cd apps/api && uv sync && uv run fastapi dev app/main.py )  # backend
+
+# Regenerate TS types from FastAPI's OpenAPI schema (backend must be up)
+npm run gen:types --workspace apps/web
+```
+
+See `.helix/README.md` for what helixcli has scaffolded so far.
