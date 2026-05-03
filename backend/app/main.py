@@ -145,6 +145,14 @@ async def lifespan(app: FastAPI):
         await conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_sessions_project_id ON sessions(project_id)"
         ))
+        # Composite index for find_last_user_message: WHERE session_id = ? AND
+        # event_type = 'message' ORDER BY id DESC LIMIT 1. The (session_id,
+        # id) index alone has to walk back through every tool/task/plan
+        # event before finding a message; this composite makes it O(1).
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_session_events_session_type_id "
+            "ON session_events(session_id, event_type, id)"
+        ))
         # Per-session toggle: when true, attached context files are reached
         # only via the `retrieve` tool, never dumped into the prompt.
         await conn.execute(text(
@@ -255,6 +263,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/livez", tags=["health"], include_in_schema=False)
+async def livez() -> dict:
+    """Liveness probe — process is up. Cheap, no I/O. k8s / docker-compose
+    healthcheck targets this; failing it triggers a restart."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz", tags=["health"], include_in_schema=False)
+async def readyz() -> dict:
+    """Readiness probe — DB reachable, can serve traffic. Failing it pulls
+    the pod out of the load-balancer rotation but does NOT restart it."""
+    from sqlalchemy import text
+    from app.infrastructure.storage.postgres import get_postgres
+    pg = get_postgres()
+    try:
+        async with pg.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as e:
+        # 503 status so the orchestrator marks us unready.
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail=f"db unreachable: {e}")
+    return {"status": "ready"}
+
 
 register_exception_handlers(app)
 app.include_router(router, prefix="/api/v1")

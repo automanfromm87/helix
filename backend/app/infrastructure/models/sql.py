@@ -201,7 +201,15 @@ class SessionEventRow(Base):
 
     session: Mapped[SessionRow] = relationship(back_populates="events")
 
-    __table_args__ = (Index("ix_session_events_session_id_id", "session_id", "id"),)
+    __table_args__ = (
+        Index("ix_session_events_session_id_id", "session_id", "id"),
+        # Targets `find_last_user_message`: WHERE session_id = ? AND
+        # event_type = 'message' ORDER BY id DESC LIMIT 1. On long sessions
+        # the (session_id, id) index alone has to walk back through every
+        # tool/task/plan event before finding a message; this composite
+        # makes it constant-time.
+        Index("ix_session_events_session_type_id", "session_id", "event_type", "id"),
+    )
 
 
 class LLMCallRow(Base):

@@ -17,6 +17,7 @@ from app.domain.models.event import (
     SearchToolContent,
     BrowserToolContent,
     SkillToolContent,
+    ToolContent,
     ToolStatus,
     AgentEvent,
     McpToolContent,
@@ -290,111 +291,33 @@ class AgentTaskRunner(TaskRunner):
         return blocks
     
 
-    # TODO: refactor this function
     async def _handle_tool_event(self, event: ToolEvent):
-        """Generate tool content"""
+        """Generate side-panel `tool_content` for an emitted ToolEvent.
+
+        Dispatches to a per-tool renderer based on `event.tool_name`. Each
+        renderer is its own small async method so the failure modes stay
+        isolated — adding a new tool type means writing one renderer and
+        registering it, instead of wedging another elif into a long chain.
+        """
+        if event.status != ToolStatus.CALLED:
+            return
+        # If the tool call itself reported sandbox-unavailable, the follow-
+        # up sandbox calls below would just hit the same error. Skip
+        # rendering — FE shows the args/error inline.
+        fr = event.function_result
+        if fr is not None and fr.code == TOOL_RESULT_SANDBOX_UNAVAILABLE:
+            return
+
+        renderer = self._TOOL_RENDERERS.get(event.tool_name)
+        if renderer is None:
+            logger.warning(
+                "Agent %s received unknown tool event: %s",
+                self._agent_id, event.tool_name,
+            )
+            return
+
         try:
-            if event.status == ToolStatus.CALLED:
-                # If the tool call itself reported sandbox-unavailable, the
-                # follow-up sandbox calls below would just hit the same
-                # error. Skip rendering — FE shows the args/error inline.
-                fr = event.function_result
-                if fr is not None and fr.code == TOOL_RESULT_SANDBOX_UNAVAILABLE:
-                    return
-                if event.tool_name == "browser":
-                    # If the tool call itself failed (e.g. blocked navigation), the
-                    # browser may not be on a renderable page — capturing a
-                    # screenshot would just raise. Skip silently in that case;
-                    # the UI now falls back to args.
-                    if event.function_result and not event.function_result.success:
-                        event.tool_content = None
-                    else:
-                        event.tool_content = BrowserToolContent(
-                            screenshot=await self._get_browser_screenshot()
-                        )
-                elif event.tool_name == "search":
-                    search_results: ToolResult[SearchResults] = event.function_result
-                    logger.debug(f"Search tool results: {search_results}")
-                    # Defend against the same pattern as shell/file: data may be
-                    # None on a failed search (rate limit, upstream timeout) and
-                    # `.data.results` would AttributeError.
-                    if search_results and search_results.success and search_results.data:
-                        event.tool_content = SearchToolContent(
-                            results=search_results.data.results,
-                        )
-                    else:
-                        event.tool_content = SearchToolContent(results=[])
-                elif event.tool_name == "shell":
-                    if "id" in event.function_args:
-                        shell_result = await self._sandbox.view_shell(event.function_args["id"], console=True)
-                        # `data` is Optional on ToolResult — when the sandbox call
-                        # fails (session expired, bad id) it comes back as None and
-                        # `.data.get(...)` would AttributeError. Surface a clear
-                        # placeholder instead so the panel still renders.
-                        if shell_result and shell_result.success and shell_result.data:
-                            event.tool_content = ShellToolContent(
-                                console=shell_result.data.get("console", []),
-                            )
-                        else:
-                            msg = (shell_result.message if shell_result else None) or "no output"
-                            event.tool_content = ShellToolContent(console=f"(shell unavailable: {msg})")
-                    else:
-                        event.tool_content = ShellToolContent(console="(No Console)")
-                elif event.tool_name == "file":
-                    if "file" in event.function_args:
-                        file_path = event.function_args["file"]
-                        file_read_result = await self._sandbox.file_read(file_path)
-                        if file_read_result and file_read_result.success and file_read_result.data:
-                            file_content: str = file_read_result.data.get("content", "")
-                            event.tool_content = FileToolContent(content=file_content)
-                            await self._sync_file_to_storage(file_path)
-                        else:
-                            msg = (file_read_result.message if file_read_result else None) or "read failed"
-                            event.tool_content = FileToolContent(content=f"(file unavailable: {msg})")
-                    else:
-                        event.tool_content = FileToolContent(content="(No Content)")
-                elif event.tool_name == "skill":
-                    # `load_skill` returns the skill body as a markdown string in
-                    # ToolResult.data. Defend against the all-too-common shapes
-                    # smaller models produce: missing data, non-string body,
-                    # missing args["name"]. Surface what we have either way.
-                    skill_name = ""
-                    args = event.function_args or {}
-                    if isinstance(args, dict):
-                        raw_name = args.get("name")
-                        skill_name = raw_name if isinstance(raw_name, str) else ""
-                    body = ""
-                    fr = event.function_result
-                    if fr and fr.success and fr.data is not None:
-                        body = fr.data if isinstance(fr.data, str) else str(fr.data)
-                    elif fr and fr.message:
-                        body = f"_(skill load failed: {fr.message})_"
-                    else:
-                        body = "_(skill body unavailable)_"
-                    event.tool_content = SkillToolContent(name=skill_name, body=body)
-                elif event.tool_name == "mcp":
-                    logger.debug(f"Processing MCP tool event: function_result={event.function_result}")
-                    if event.function_result:
-                        if hasattr(event.function_result, 'data') and event.function_result.data:
-                            logger.debug(f"MCP tool result data: {event.function_result.data}")
-                            event.tool_content = McpToolContent(result=event.function_result.data)
-                        elif hasattr(event.function_result, 'success') and event.function_result.success:
-                            logger.debug(f"MCP tool result (success, no data): {event.function_result}")
-                            result_data = event.function_result.model_dump() if hasattr(event.function_result, 'model_dump') else str(event.function_result)
-                            event.tool_content = McpToolContent(result=result_data)
-                        else:
-                            logger.debug(f"MCP tool result (fallback): {event.function_result}")
-                            event.tool_content = McpToolContent(result=str(event.function_result))
-                    else:
-                        logger.warning("MCP tool: No function_result found")
-                        event.tool_content = McpToolContent(result="No result available")
-                    
-                    logger.debug(f"MCP tool_content set to: {event.tool_content}")
-                    if event.tool_content:
-                        logger.debug(f"MCP tool_content.result: {event.tool_content.result}")
-                        logger.debug(f"MCP tool_content dict: {event.tool_content.model_dump()}")
-                else:
-                    logger.warning(f"Agent {self._agent_id} received unknown tool event: {event.tool_name}")
+            event.tool_content = await renderer(self, event)
         except SandboxUnavailableError as e:
             # Backing sandbox is offline (operator stopped it, container
             # disappeared, network blip). Skip the render — single INFO log
@@ -403,8 +326,98 @@ class AgentTaskRunner(TaskRunner):
                 "Agent %s skipped tool render (sandbox unavailable): %s",
                 self._agent_id, e,
             )
-        except Exception as e:
-            logger.exception(f"Agent {self._agent_id} failed to generate tool content: {e}")
+        except Exception:
+            logger.exception(
+                "Agent %s failed to generate tool content for %s",
+                self._agent_id, event.tool_name,
+            )
+
+    # ------------------------------------------------------------------
+    # Per-tool renderers
+    # ------------------------------------------------------------------
+    #
+    # Each renderer takes `self` + a CALLED ToolEvent and returns an
+    # Optional[ToolContent]. Returning None means "don't show a side panel
+    # for this event" (e.g. failed browser nav has no usable screenshot).
+    # All of them must defend against the patterns smaller models produce:
+    # missing args keys, non-dict args, ToolResult.data being None,
+    # tool_result success=False with no data attached.
+
+    async def _render_browser(self, event: ToolEvent) -> Optional[ToolContent]:
+        # Failed nav (blocked, target_closed) → browser may be on a
+        # non-renderable page. Skip silently; FE renders the args.
+        if event.function_result and not event.function_result.success:
+            return None
+        return BrowserToolContent(screenshot=await self._get_browser_screenshot())
+
+    async def _render_search(self, event: ToolEvent) -> Optional[ToolContent]:
+        fr: ToolResult[SearchResults] = event.function_result
+        if fr and fr.success and fr.data:
+            return SearchToolContent(results=fr.data.results)
+        return SearchToolContent(results=[])
+
+    async def _render_shell(self, event: ToolEvent) -> Optional[ToolContent]:
+        args = event.function_args if isinstance(event.function_args, dict) else {}
+        shell_id = args.get("id")
+        if not shell_id:
+            return ShellToolContent(console="(No Console)")
+        result = await self._sandbox.view_shell(shell_id, console=True)
+        if result and result.success and result.data:
+            return ShellToolContent(console=result.data.get("console", []))
+        msg = (result.message if result else None) or "no output"
+        return ShellToolContent(console=f"(shell unavailable: {msg})")
+
+    async def _render_file(self, event: ToolEvent) -> Optional[ToolContent]:
+        args = event.function_args if isinstance(event.function_args, dict) else {}
+        file_path = args.get("file")
+        if not isinstance(file_path, str) or not file_path:
+            return FileToolContent(content="(No Content)")
+        result = await self._sandbox.file_read(file_path)
+        if result and result.success and result.data:
+            content = result.data.get("content", "")
+            await self._sync_file_to_storage(file_path)
+            return FileToolContent(content=content)
+        msg = (result.message if result else None) or "read failed"
+        return FileToolContent(content=f"(file unavailable: {msg})")
+
+    async def _render_skill(self, event: ToolEvent) -> Optional[ToolContent]:
+        # `load_skill` returns the skill body as a markdown string in
+        # ToolResult.data. Defended against missing args["name"] /
+        # non-string body.
+        args = event.function_args if isinstance(event.function_args, dict) else {}
+        raw_name = args.get("name")
+        skill_name = raw_name if isinstance(raw_name, str) else ""
+        fr = event.function_result
+        if fr and fr.success and fr.data is not None:
+            body = fr.data if isinstance(fr.data, str) else str(fr.data)
+        elif fr and fr.message:
+            body = f"_(skill load failed: {fr.message})_"
+        else:
+            body = "_(skill body unavailable)_"
+        return SkillToolContent(name=skill_name, body=body)
+
+    async def _render_mcp(self, event: ToolEvent) -> Optional[ToolContent]:
+        fr = event.function_result
+        if fr is None:
+            return McpToolContent(result="No result available")
+        if getattr(fr, "data", None):
+            return McpToolContent(result=fr.data)
+        if getattr(fr, "success", False):
+            payload = fr.model_dump() if hasattr(fr, "model_dump") else str(fr)
+            return McpToolContent(result=payload)
+        return McpToolContent(result=str(fr))
+
+    # Dispatch table: tool_name -> bound renderer. Class-level so the dict
+    # is built once, not on every event. `_TOOL_RENDERERS` keys must match
+    # the toolkit `name` attributes.
+    _TOOL_RENDERERS = {
+        "browser": _render_browser,
+        "search": _render_search,
+        "shell": _render_shell,
+        "file": _render_file,
+        "skill": _render_skill,
+        "mcp": _render_mcp,
+    }
 
     async def run(self, task: Task) -> None:
         """Process agent's message queue and run the agent's flow"""
