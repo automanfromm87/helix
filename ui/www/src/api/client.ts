@@ -11,6 +11,7 @@ import {
   getStoredToken,
   storeToken,
 } from './auth'
+import * as bus from '@/lib/eventBus'
 
 // Module-augment axios so we can stop sprinkling `as any` to attach the two
 // flags the refresh interceptor needs.
@@ -107,7 +108,7 @@ const refreshAuthToken = async (): Promise<string | null> => {
   if (!refreshToken) {
     clearStoredTokens()
     delete apiClient.defaults.headers.common.Authorization
-    window.dispatchEvent(new CustomEvent('auth:logout'))
+    bus.emit('auth:logout', undefined)
     redirectToLogin()
     isRefreshing = false
     throw new Error('No refresh token available')
@@ -132,7 +133,7 @@ const refreshAuthToken = async (): Promise<string | null> => {
     clearStoredTokens()
     delete apiClient.defaults.headers.common.Authorization
     processQueue(refreshError, null)
-    window.dispatchEvent(new CustomEvent('auth:logout'))
+    bus.emit('auth:logout', undefined)
     redirectToLogin()
     throw refreshError
   } finally {
@@ -386,7 +387,7 @@ export const createSSEConnection = <T = unknown>(
           finish(new Error('Token refresh failed'))
           return
         }
-        window.dispatchEvent(new CustomEvent('auth:token-refreshed'))
+        bus.emit('auth:token-refreshed', undefined)
       } catch (refreshErr) {
         finish(refreshErr instanceof Error ? refreshErr : new Error(String(refreshErr)))
         return

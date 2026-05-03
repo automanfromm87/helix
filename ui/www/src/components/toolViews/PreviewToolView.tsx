@@ -3,6 +3,7 @@ import { ExternalLink, MousePointerClick, RefreshCw } from 'lucide-react'
 
 import { apiClient, type ApiResponse } from '@/api/client'
 import type { ToolViewProps } from '@/constants/tool'
+import * as bus from '@/lib/eventBus'
 import { cn } from '@/lib/utils'
 
 /**
@@ -132,8 +133,7 @@ export default function PreviewToolView({ sessionId }: ToolViewProps) {
       const d = e.data
       if (!d || d.source !== 'helix-inspector') return
       if (d.type === 'select') {
-        const detail = d.payload as InspectorPayload
-        window.dispatchEvent(new CustomEvent('helix:preview:select', { detail }))
+        bus.emit('helix:preview:select', d.payload as InspectorPayload)
         setInspecting(false)
       } else if (d.type === 'cancel') {
         setInspecting(false)

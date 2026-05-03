@@ -7,8 +7,8 @@ import UserMenu from '@/components/UserMenu'
 import { HelixLogoTextIcon } from '@/components/icons'
 import { SimpleBar } from '@/components/ui/SimpleBar'
 import { createProject } from '@/api/projects'
-import { getCachedClientConfig } from '@/api/config'
 import { useAuth } from '@/hooks/useAuth'
+import { useClientConfig } from '@/hooks/useClientConfig'
 import { useFilePanel } from '@/hooks/useFilePanel'
 import { useLeftPanel } from '@/hooks/useLeftPanel'
 import { usePendingMessage } from '@/hooks/usePendingMessage'
@@ -24,25 +24,16 @@ export default function HomePage() {
   const [message, setMessage] = useState('')
   const [attachments, setAttachments] = useState<FileInfo[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [showGithubButton, setShowGithubButton] = useState(false)
-  const [githubRepositoryUrl, setGithubRepositoryUrl] = useState(
-    'https://github.com/simpleyyt/ai-helix',
-  )
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [userMenuTimeout, setUserMenuTimeout] = useState<number | null>(null)
+  const { config } = useClientConfig()
+  const showGithubButton = config?.show_github_button ?? false
+  const githubRepositoryUrl =
+    config?.github_repository_url ?? 'https://github.com/simpleyyt/ai-helix'
 
   useEffect(() => {
     hideFilePanel()
   }, [hideFilePanel])
-
-  useEffect(() => {
-    void getCachedClientConfig().then((cfg) => {
-      if (cfg) {
-        setShowGithubButton(cfg.show_github_button)
-        setGithubRepositoryUrl(cfg.github_repository_url)
-      }
-    })
-  }, [])
 
   const avatarLetter = currentUser?.fullname?.charAt(0)?.toUpperCase() || 'M'
 

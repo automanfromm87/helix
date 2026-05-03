@@ -3,6 +3,7 @@ import { useMemo } from 'react'
 import VNCViewer from '@/components/VNCViewer'
 import { TakeOverIcon } from '@/components/icons'
 import type { ToolViewProps } from '@/constants/tool'
+import * as bus from '@/lib/eventBus'
 
 export default function BrowserToolView({
   sessionId,
@@ -14,9 +15,7 @@ export default function BrowserToolView({
   const imageUrl = useMemo(() => screenshot ?? '', [screenshot])
 
   const takeOver = () => {
-    window.dispatchEvent(
-      new CustomEvent('takeover', { detail: { sessionId, active: true } }),
-    )
+    bus.emit('takeover', { sessionId, active: true })
   }
 
   return (

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { type ReactNode } from 'react'
 import {
   Navigate,
   Outlet,
@@ -17,7 +17,7 @@ import ShareLayout from '@/pages/ShareLayout'
 import SharePage from '@/pages/SharePage'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import { getStoredToken } from '@/api/auth'
-import { getCachedClientConfig } from '@/api/config'
+import { useClientConfig } from '@/hooks/useClientConfig'
 
 const wrap = (scope: string, node: ReactNode): ReactNode => (
   <ErrorBoundary scope={scope}>{node}</ErrorBoundary>
@@ -25,41 +25,18 @@ const wrap = (scope: string, node: ReactNode): ReactNode => (
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const location = useLocation()
-  const [authProvider, setAuthProvider] = useState<string | null | undefined>(undefined)
-
-  useEffect(() => {
-    let cancelled = false
-    void getCachedClientConfig().then((cfg) => {
-      if (!cancelled) setAuthProvider(cfg?.auth_provider ?? null)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { authProvider } = useClientConfig()
 
   if (authProvider === undefined) return null
-
   if (authProvider === 'none' || authProvider === null) return <>{children}</>
-
-  const hasToken = !!getStoredToken()
-  if (!hasToken) {
+  if (!getStoredToken()) {
     return <Navigate to={`/login?redirect=${encodeURIComponent(location.pathname)}`} replace />
   }
   return <>{children}</>
 }
 
 function LoginGate({ children }: { children: ReactNode }) {
-  const [authProvider, setAuthProvider] = useState<string | null | undefined>(undefined)
-
-  useEffect(() => {
-    let cancelled = false
-    void getCachedClientConfig().then((cfg) => {
-      if (!cancelled) setAuthProvider(cfg?.auth_provider ?? null)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { authProvider } = useClientConfig()
 
   if (authProvider === undefined) return null
   if (authProvider === 'none') return <Navigate to="/" replace />

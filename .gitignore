@@ -82,6 +82,12 @@ parts/
 sdist/
 var/
 wheels/
+
+# The Python `lib/` rule above accidentally matches `ui/www/src/lib/`,
+# which is the frontend's shared utilities folder (cn helper, event bus,
+# message reducer, …). Re-include it.
+!ui/www/src/lib/
+!ui/www/src/lib/**
 *.egg-info/
 .installed.cfg
 *.egg

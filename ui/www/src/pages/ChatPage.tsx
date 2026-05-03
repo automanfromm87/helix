@@ -16,6 +16,7 @@ import ShareMenu from '@/components/ShareMenu'
 import { SimpleBar, type SimpleBarHandle } from '@/components/ui/SimpleBar'
 import ToolPanel, { type ToolPanelHandle } from '@/components/ToolPanel'
 import type { InspectorPayload } from '@/components/toolViews/PreviewToolView'
+import * as bus from '@/lib/eventBus'
 import { useChatStream } from '@/hooks/useChatStream'
 import { useFilePanel } from '@/hooks/useFilePanel'
 import { useLeftPanel } from '@/hooks/useLeftPanel'
@@ -123,17 +124,14 @@ export default function ChatPage() {
   // above the chat input; on send, the formatted blocks are prepended to
   // the message so the agent gets the React source context.
   useEffect(() => {
-    const onSelect = (e: Event) => {
-      const detail = (e as CustomEvent<InspectorPayload>).detail
+    return bus.on('helix:preview:select', (detail) => {
       if (!detail) return
       setSelectedContexts((prev) => {
         const key = inspectorContextKey(detail)
         if (prev.some((p) => inspectorContextKey(p) === key)) return prev
         return [...prev, detail]
       })
-    }
-    window.addEventListener('helix:preview:select', onSelect)
-    return () => window.removeEventListener('helix:preview:select', onSelect)
+    })
   }, [])
 
   // ToolUse renders option buttons under any `message_ask_user` whose
@@ -144,8 +142,7 @@ export default function ChatPage() {
   // realizing later they wanted a different answer) gets to send it as
   // a fresh message — same semantics as typing it manually.
   useEffect(() => {
-    const onReply = (e: Event) => {
-      const text = (e as CustomEvent<string>).detail
+    return bus.on('helix:reply-with-option', (text) => {
       if (!text) return
       // Clear page-local input state too — the user might have typed
       // something they were about to send when they clicked an option.
@@ -155,9 +152,7 @@ export default function ChatPage() {
       setAwaitingReply(false)
       setFollow(true)
       chat(text, [])
-    }
-    window.addEventListener('helix:reply-with-option', onReply)
-    return () => window.removeEventListener('helix:reply-with-option', onReply)
+    })
   }, [chat, setAwaitingReply])
 
   const handleScroll = () => {

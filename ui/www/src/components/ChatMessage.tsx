@@ -1,13 +1,7 @@
 import { useState, type ComponentType } from 'react'
 import { Bot, ChevronDown, Check, Pencil } from 'lucide-react'
 
-import {
-  type AttachmentsContent,
-  type Message,
-  type MessageContent,
-  type TaskContent,
-  type ToolContent,
-} from '@/types/message'
+import { type Message, type ToolContent } from '@/types/message'
 import { useRelativeTime } from '@/hooks/useTime'
 import { HelixTextIcon } from '@/components/icons'
 import AttachmentsMessage from './AttachmentsMessage'
@@ -43,7 +37,7 @@ export default function ChatMessage({
   const hideAssistantHeader = hideHeader ?? false
 
   if (message.type === 'user') {
-    const content = message.content as MessageContent
+    const content = message.content
     const canEdit = Boolean(onEditUserMessage && content.event_id)
     const startEdit = () => {
       setDraft(content.content)
@@ -123,7 +117,7 @@ export default function ChatMessage({
   }
 
   if (message.type === 'assistant') {
-    const content = message.content as MessageContent
+    const content = message.content
     return (
       <div
         className={cn('flex flex-col gap-2 w-full group', hideAssistantHeader ? 'mt-0' : 'mt-3')}
@@ -164,12 +158,12 @@ export default function ChatMessage({
   }
 
   if (message.type === 'tool') {
-    const tool = message.content as ToolContent
+    const tool = message.content
     return <ToolUse tool={tool} onClick={() => onToolClick?.(tool)} />
   }
 
   if (message.type === 'task') {
-    const task = message.content as TaskContent
+    const task = message.content
     const isDone = task.status === 'completed'
     const isFailed = task.status === 'failed' || task.status === 'blocked'
     return (
@@ -229,7 +223,7 @@ export default function ChatMessage({
   }
 
   if (message.type === 'attachments') {
-    const att = message.content as AttachmentsContent
+    const att = message.content
     if (att.role === 'assistant') {
       return (
         <div

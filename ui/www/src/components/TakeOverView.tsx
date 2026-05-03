@@ -1,11 +1,7 @@
 import { useEffect, useState } from 'react'
 
+import * as bus from '@/lib/eventBus'
 import VNCViewer from './VNCViewer'
-
-interface TakeoverDetail {
-  sessionId: string
-  active: boolean
-}
 
 type ConnState = 'connecting' | 'connected' | 'disconnected'
 
@@ -17,9 +13,7 @@ export default function TakeOverView() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<TakeoverDetail>).detail
-      if (!detail) return
+    return bus.on('takeover', (detail) => {
       if (detail.active) {
         setSessionId(detail.sessionId)
         setActive(true)
@@ -28,9 +22,7 @@ export default function TakeOverView() {
       } else {
         setActive(false)
       }
-    }
-    window.addEventListener('takeover', handler as EventListener)
-    return () => window.removeEventListener('takeover', handler as EventListener)
+    })
   }, [])
 
   if (!active || !sessionId) return null

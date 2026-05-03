@@ -21,14 +21,17 @@ import {
   type TitleEventData,
   type ToolEventData,
 } from '@/types/event'
-import {
-  type AttachmentsContent,
-  type Message,
-  type MessageContent,
-  type TaskContent,
-  type ToolContent,
-} from '@/types/message'
+import { type Message, type ToolContent } from '@/types/message'
 import { SessionStatus } from '@/types/response'
+import {
+  reduceAppendUserAttachments,
+  reduceAppendUserMessage,
+  reduceError,
+  reduceMessage,
+  reduceTask,
+  reduceTool,
+  reduceTruncateAtUserEvent,
+} from '@/lib/messageReducer'
 import { showErrorToast } from '@/utils/toast'
 
 export interface ChatStream {
@@ -63,8 +66,6 @@ interface Options {
   /** Called once on session change so the page can drop file-panel UI. */
   onSessionChanged?: () => void
 }
-
-const isPlaceholderEventId = (id?: string): boolean => !id || /^[0-]+$/.test(id)
 
 /**
  * Owns the live SSE chat lifecycle for a session: event reducer, in-flight
@@ -116,139 +117,21 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
   }, [])
 
   const handleMessageEvent = useCallback((data: MessageEventData) => {
-    setMessages((prev) => {
-      // Streaming: incremental emissions of the same logical assistant turn
-      // share `message_id`. Replace the existing bubble in place rather than
-      // appending a new one. The final emit (partial=false) freezes the text.
-      if (data.message_id) {
-        const idx = prev.findIndex(
-          (m) =>
-            m.type === data.role &&
-            (m.content as MessageContent).message_id === data.message_id,
-        )
-        if (idx >= 0) {
-          const next = prev.slice()
-          next[idx] = { type: data.role, content: { ...data } as MessageContent } as Message
-          return next
-        }
-      }
-      // The backend occasionally re-emits an event with the same event_id —
-      // restoreSession replay overlapping with live SSE, multi-agent boundary
-      // acks, etc. Treat same (type, event_id) as the same row to avoid
-      // React duplicate-key warnings. Placeholder ids ("0...0", incl. nil-
-      // UUID) are skipped so unrelated rows that share the sentinel don't
-      // get collapsed into one.
-      if (!isPlaceholderEventId(data.event_id)) {
-        const idx = prev.findIndex(
-          (m) =>
-            m.type === data.role &&
-            (m.content as MessageContent).event_id === data.event_id,
-        )
-        if (idx >= 0) {
-          const next = prev.slice()
-          next[idx] = { type: data.role, content: { ...data } as MessageContent } as Message
-          return next
-        }
-      }
-      const next: Message[] = [
-        ...prev,
-        { type: data.role, content: { ...data } as MessageContent } as Message,
-      ]
-      if (data.attachments && data.attachments.length > 0) {
-        next.push({ type: 'attachments', content: { ...data } as AttachmentsContent })
-      }
-      return next
-    })
+    setMessages((prev) => reduceMessage(prev, data))
   }, [])
 
   const handleToolEvent = useCallback((data: ToolEventData) => {
-    const toolContent: ToolContent = { ...data }
-    setMessages((prev) => {
-      const directIdx = prev.findIndex(
-        (m) =>
-          m.type === 'tool' &&
-          (m.content as ToolContent).tool_call_id === toolContent.tool_call_id,
-      )
-      if (directIdx >= 0) {
-        const next = prev.slice()
-        next[directIdx] = { type: 'tool', content: toolContent }
-        return next
-      }
-      for (let i = prev.length - 1; i >= 0; i--) {
-        const m = prev[i]
-        if (m.type !== 'task') continue
-        const task = m.content as TaskContent
-        const toolIdx = task.tools.findIndex(
-          (t) => t.tool_call_id === toolContent.tool_call_id,
-        )
-        if (toolIdx >= 0) {
-          const nextTools = task.tools.slice()
-          nextTools[toolIdx] = toolContent
-          const next = prev.slice()
-          next[i] = { type: 'task', content: { ...task, tools: nextTools } as TaskContent }
-          return next
-        }
-        if (task.status === 'running') {
-          const next = prev.slice()
-          next[i] = {
-            type: 'task',
-            content: { ...task, tools: [...task.tools, toolContent] } as TaskContent,
-          }
-          return next
-        }
-        break
-      }
-      return [...prev, { type: 'tool', content: toolContent }]
-    })
-    lastTool.current = toolContent
-    if (toolContent.name !== 'message') {
-      lastNoMessageTool.current = toolContent
-      if (realTimeRef.current) toolPanelRef.current?.showToolPanel(toolContent, true)
+    const tool: ToolContent = { ...data }
+    setMessages((prev) => reduceTool(prev, data))
+    lastTool.current = tool
+    if (tool.name !== 'message') {
+      lastNoMessageTool.current = tool
+      if (realTimeRef.current) toolPanelRef.current?.showToolPanel(tool, true)
     }
   }, [toolPanelRef])
 
   const handleTaskEvent = useCallback((data: TaskEventData) => {
-    setMessages((prev) => {
-      const idx = prev.findIndex(
-        (m) =>
-          m.type === 'task' &&
-          (m.content as TaskContent).task_id === data.task_id,
-      )
-      if (idx >= 0) {
-        const existing = prev[idx].content as TaskContent
-        const next = prev.slice()
-        next[idx] = {
-          type: 'task',
-          content: {
-            ...existing,
-            status: data.status,
-            title: data.title,
-            details: data.details ?? existing.details,
-            result: data.result ?? existing.result,
-            error: data.error ?? existing.error,
-          } as TaskContent,
-        }
-        return next
-      }
-      return [
-        ...prev,
-        {
-          type: 'task',
-          content: {
-            task_id: data.task_id,
-            plan_id: data.plan_id,
-            position: data.position,
-            title: data.title,
-            details: data.details ?? null,
-            status: data.status,
-            result: data.result ?? null,
-            error: data.error ?? null,
-            tools: [],
-            timestamp: data.timestamp,
-          } as TaskContent,
-        },
-      ]
-    })
+    setMessages((prev) => reduceTask(prev, data))
     // Mirror task transitions into PlanPanel's snapshot — backend only
     // emits PlanEvent at plan-level transitions, so without this the plan
     // panel would show all tasks pending until the entire plan finished.
@@ -274,17 +157,7 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
 
   const handleErrorEvent = useCallback((data: ErrorEventData) => {
     setIsLoading(false)
-    setMessages((prev) => [
-      ...prev,
-      {
-        type: 'assistant',
-        content: {
-          event_id: data.event_id,
-          content: `**⚠️ Error**\n\n${data.error}`,
-          timestamp: data.timestamp,
-        } as MessageContent,
-      },
-    ])
+    setMessages((prev) => reduceError(prev, data))
   }, [])
 
   const endChat = useCallback(() => {
@@ -367,26 +240,12 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
       chatHandleRef.current?.cancel()
       chatHandleRef.current = null
 
+      const ts = Math.floor(Date.now() / 1000)
       if (message.trim()) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            type: 'user',
-            content: {
-              content: message,
-              timestamp: Math.floor(Date.now() / 1000),
-            } as MessageContent,
-          },
-        ])
+        setMessages((prev) => reduceAppendUserMessage(prev, message, ts))
       }
       if (files.length > 0) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            type: 'attachments',
-            content: { role: 'user', attachments: files } as AttachmentsContent,
-          },
-        ])
+        setMessages((prev) => reduceAppendUserAttachments(prev, files, ts))
       }
 
       setIsLoading(true)
@@ -431,12 +290,7 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
       // Drop everything from the edited message onward locally so the panel
       // doesn't briefly show stale assistant output while the network call
       // truncates server-side.
-      setMessages((prev) => {
-        const idx = prev.findIndex(
-          (m) => m.type === 'user' && (m.content as MessageContent).event_id === eventId,
-        )
-        return idx >= 0 ? prev.slice(0, idx) : prev
-      })
+      setMessages((prev) => reduceTruncateAtUserEvent(prev, eventId))
       lastEventId.current = ''
       lastTool.current = undefined
       lastNoMessageTool.current = undefined

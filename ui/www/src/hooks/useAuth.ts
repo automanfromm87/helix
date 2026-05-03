@@ -19,6 +19,7 @@ import {
   type User,
 } from '@/api/auth'
 import { getCachedAuthProvider } from '@/api/config'
+import * as bus from '@/lib/eventBus'
 
 interface AuthStore {
   currentUser: User | null
@@ -157,9 +158,7 @@ export function useAuth() {
   const store = useAuthStore()
 
   useEffect(() => {
-    const handler = () => useAuthStore.getState().logout(true)
-    window.addEventListener('auth:logout', handler)
-    return () => window.removeEventListener('auth:logout', handler)
+    return bus.on('auth:logout', () => useAuthStore.getState().logout(true))
   }, [])
 
   useEffect(() => {

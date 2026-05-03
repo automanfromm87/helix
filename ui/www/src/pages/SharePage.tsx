@@ -3,14 +3,7 @@ import { useParams } from 'react-router-dom'
 import { ArrowDown, Bot, FileSearch, Link as LinkIcon, Play } from 'lucide-react'
 
 import * as agentApi from '@/api/agent'
-import {
-  isConsecutiveAssistant,
-  type AttachmentsContent,
-  type Message,
-  type MessageContent,
-  type TaskContent,
-  type ToolContent,
-} from '@/types/message'
+import { isConsecutiveAssistant, type Message, type ToolContent } from '@/types/message'
 import {
   type AgentSSEEvent,
   type ErrorEventData,
@@ -28,6 +21,12 @@ import { SimpleBar, type SimpleBarHandle } from '@/components/ui/SimpleBar'
 import ToolPanel, { type ToolPanelHandle } from '@/components/ToolPanel'
 import { useFilePanel } from '@/hooks/useFilePanel'
 import { useSessionFileList } from '@/hooks/useSessionFileList'
+import {
+  reduceError,
+  reduceMessage,
+  reduceTask,
+  reduceTool,
+} from '@/lib/messageReducer'
 import { copyToClipboard } from '@/utils/dom'
 import { showErrorToast, showSuccessToast } from '@/utils/toast'
 
@@ -61,118 +60,30 @@ export default function SharePage() {
   const simpleBarRef = useRef<SimpleBarHandle>(null)
 
   const handleMessageEvent = useCallback((data: MessageEventData) => {
-    setMessages((prev) => {
-      // Streaming: replace prior partial with the same message_id in place.
-      if (data.message_id) {
-        const idx = prev.findIndex(
-          (m) =>
-            m.type === data.role &&
-            (m.content as MessageContent).message_id === data.message_id,
-        )
-        if (idx >= 0) {
-          const next = [...prev]
-          next[idx] = { type: data.role, content: { ...data } as MessageContent } as Message
-          return next
-        }
-      }
-      const next = [
-        ...prev,
-        { type: data.role, content: { ...data } as MessageContent } as Message,
-      ]
-      if (data.attachments?.length > 0) {
-        next.push({ type: 'attachments', content: { ...data } as AttachmentsContent })
-      }
-      return next
-    })
+    setMessages((prev) => reduceMessage(prev, data))
   }, [])
 
   const handleToolEvent = useCallback(
     (data: ToolEventData) => {
-      const toolContent: ToolContent = { ...data }
-      setMessages((prev) => {
-        const directIdx = prev.findIndex(
-          (m) =>
-            m.type === 'tool' &&
-            (m.content as ToolContent).tool_call_id === toolContent.tool_call_id,
-        )
-        if (directIdx >= 0) {
-          const next = prev.slice()
-          next[directIdx] = { type: 'tool', content: toolContent }
-          return next
-        }
-        for (let i = prev.length - 1; i >= 0; i--) {
-          const m = prev[i]
-          if (m.type !== 'task') continue
-          const task = m.content as TaskContent
-          const toolIdx = task.tools.findIndex(
-            (t) => t.tool_call_id === toolContent.tool_call_id,
-          )
-          if (toolIdx >= 0) {
-            const nextTools = task.tools.slice()
-            nextTools[toolIdx] = toolContent
-            const next = prev.slice()
-            next[i] = { type: 'task', content: { ...task, tools: nextTools } as TaskContent }
-            return next
-          }
-          if (task.status === 'running') {
-            const next = prev.slice()
-            next[i] = {
-              type: 'task',
-              content: { ...task, tools: [...task.tools, toolContent] } as TaskContent,
-            }
-            return next
-          }
-          break
-        }
-        return [...prev, { type: 'tool', content: toolContent }]
-      })
-      lastTool.current = toolContent
-      if (toolContent.name !== 'message') {
-        lastNoMessageTool.current = toolContent
-        if (realTime) toolPanel.current?.showToolPanel(toolContent, false)
+      const tool: ToolContent = { ...data }
+      setMessages((prev) => reduceTool(prev, data))
+      lastTool.current = tool
+      if (tool.name !== 'message') {
+        lastNoMessageTool.current = tool
+        if (realTime) toolPanel.current?.showToolPanel(tool, false)
       }
     },
     [realTime],
   )
 
   const handleStepEvent = useCallback((data: TaskEventData) => {
-    setMessages((prev) => {
-      if (data.status === 'running') {
-        return [
-          ...prev,
-          { type: 'task', content: { ...data, tools: [] } as TaskContent },
-        ]
-      }
-      if (data.status === 'completed') {
-        for (let i = prev.length - 1; i >= 0; i--) {
-          const m = prev[i]
-          if (m.type !== 'task') continue
-          const task = m.content as TaskContent
-          const next = prev.slice()
-          next[i] = { type: 'task', content: { ...task, status: 'completed' } as TaskContent }
-          return next
-        }
-      }
-      if (data.status === 'failed') {
-        setIsLoading(false)
-      }
-      return prev
-    })
+    if (data.status === 'failed') setIsLoading(false)
+    setMessages((prev) => reduceTask(prev, data))
   }, [])
 
   const handleErrorEvent = useCallback((data: ErrorEventData) => {
     setIsLoading(false)
-    setMessages((prev) => [
-      ...prev,
-      {
-        type: 'assistant',
-        content: {
-          event_id: data.event_id,
-          content: `**⚠️ Error**\n\n${data.error}`,
-          timestamp: data.timestamp,
-        } as MessageContent,
-      },
-    ])
+    setMessages((prev) => reduceError(prev, data))
   }, [])
 
   const handleEvent = useCallback(

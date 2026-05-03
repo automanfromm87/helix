@@ -1,21 +1,12 @@
 import type { ToolContent } from '@/types/message'
 import { useToolInfo } from '@/hooks/useTool'
 import { useRelativeTime } from '@/hooks/useTime'
+import * as bus from '@/lib/eventBus'
 
 interface Props {
   tool: ToolContent
   onClick?: () => void
 }
-
-/**
- * Single-source-of-truth event name for "user clicked an option button
- * inside an `message_ask_user` tool render". Picked up in ChatPage,
- * which dispatches the option text through the regular `chat()` path.
- * A window event is the lightest decoupling between the deeply-nested
- * render tree (Message → Tool → ToolUse) and the chat dispatcher,
- * matching the existing `helix:preview:select` convention.
- */
-export const REPLY_WITH_OPTION_EVENT = 'helix:reply-with-option'
 
 export default function ToolUse({ tool, onClick }: Props) {
   const toolInfo = useToolInfo(tool)
@@ -38,13 +29,11 @@ export default function ToolUse({ tool, onClick }: Props) {
               <button
                 key={i}
                 type="button"
-                onClick={() => {
-                  // Stop propagation so click doesn't also fire the
-                  // outer message-row's onClick (which opens the tool
-                  // panel and would feel mispredicted here).
-                  window.dispatchEvent(
-                    new CustomEvent(REPLY_WITH_OPTION_EVENT, { detail: opt }),
-                  )
+                onClick={(e) => {
+                  // Stop propagation so click doesn't also fire the outer
+                  // message-row's onClick (which opens the tool panel).
+                  e.stopPropagation()
+                  bus.emit('helix:reply-with-option', opt)
                 }}
                 className="inline-flex items-center max-w-full text-left px-3 py-1.5 rounded-md border border-[var(--border-btn-main)] bg-[var(--fill-tsp-white-light)] text-[13px] text-[var(--text-primary)] hover:bg-[var(--text-brand)] hover:text-white hover:border-[var(--text-brand)] transition-colors"
               >

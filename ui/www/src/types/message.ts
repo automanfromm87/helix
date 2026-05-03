@@ -1,13 +1,6 @@
 import type { FileInfo } from '@/api/file'
 import type { TaskStatusValue } from '@/types/event'
 
-export type MessageType = 'user' | 'assistant' | 'tool' | 'task' | 'attachments'
-
-export interface Message {
-  type: MessageType
-  content: BaseContent
-}
-
 export interface BaseContent {
   timestamp: number
 }
@@ -24,6 +17,10 @@ export interface ToolContent extends BaseContent {
   tool_call_id: string
   name: string
   function: string
+  // Tool args/content are JSON payloads of arbitrary shape determined by the
+  // tool itself — keep them as `any` so individual ToolView components can
+  // access ad-hoc fields without a forest of casts. Stronger typing belongs
+  // per-tool, not on the shared shape.
   args: any
   content?: any
   status: 'calling' | 'called'
@@ -46,11 +43,25 @@ export interface AttachmentsContent extends BaseContent {
   attachments: FileInfo[]
 }
 
+/**
+ * Discriminated union over message rows. Narrowing on `m.type` gives full
+ * static access to the matching content shape, replacing the old pattern
+ * of `m.content as TaskContent` casts scattered through reducers + render
+ * code.
+ */
+export type Message =
+  | { type: 'user' | 'assistant'; content: MessageContent }
+  | { type: 'tool'; content: ToolContent }
+  | { type: 'task'; content: TaskContent }
+  | { type: 'attachments'; content: AttachmentsContent }
+
+export type MessageType = Message['type']
+
 export function isConsecutiveAssistant(messages: Message[], index: number): boolean {
   if (index <= 0) return false
   const isAst = (m: Message) =>
     m.type === 'assistant' ||
-    (m.type === 'attachments' && (m.content as AttachmentsContent).role === 'assistant')
+    (m.type === 'attachments' && m.content.role === 'assistant')
   if (!isAst(messages[index])) return false
   // Skip past tool/task separators — they belong to the same Helix turn,
   // so the assistant message after them shouldn't re-render the header.

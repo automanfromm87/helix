@@ -31,6 +31,11 @@ export default defineConfig(({ mode }) => {
     },
     esbuild: {
       target: 'es2022',
+      // Strip console.debug + debugger statements from production bundles —
+      // we keep them in code for dev SSE tracing, but they shouldn't ship.
+      // console.error / .warn stay so users still see real errors.
+      pure: mode === 'production' ? ['console.debug'] : [],
+      drop: mode === 'production' ? ['debugger'] : [],
     },
     optimizeDeps: {
       include: ['monaco-editor/esm/vs/editor/editor.api'],
