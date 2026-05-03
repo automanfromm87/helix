@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Folder, FolderPlus, GitMerge, Loader2, MessageSquareDashed, PanelLeft, X } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 
 import ProjectRow from './ProjectRow'
 import SkillsSection from './SkillsSection'
 import { useLeftPanel } from '@/hooks/useLeftPanel'
-import { createProject, listProjects } from '@/api/projects'
+import { useProjectsQuery, queryKeys } from '@/hooks/queries'
+import { createProject } from '@/api/projects'
 import { mergeSessions } from '@/api/agent'
 import type { ProjectItem } from '@/types/response'
 import { showErrorToast, showSuccessToast } from '@/utils/toast'
@@ -14,11 +16,22 @@ import { cn } from '@/lib/utils'
 export default function LeftPanel() {
   const navigate = useNavigate()
   const location = useLocation()
+  const queryClient = useQueryClient()
   const isLeftPanelShow = useLeftPanel((s) => s.isLeftPanelShow)
   const toggleLeftPanel = useLeftPanel((s) => s.toggleLeftPanel)
-  const [projects, setProjects] = useState<ProjectItem[]>([])
+  const projectsQuery = useProjectsQuery()
+  const projects: ProjectItem[] = projectsQuery.data?.projects ?? []
   const [isListScrolled, setIsListScrolled] = useState(false)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+
+  // Mark the projects cache stale on every route change. react-query's
+  // staleTime + refetchOnMount logic decides whether to actually fire the
+  // network request, so this stays cheap when the user is hopping
+  // between sessions but still surfaces server-side title/status updates
+  // shortly after they happen.
+  useEffect(() => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.projects })
+  }, [location.pathname, queryClient])
   // Merge multi-select: when active, checkboxes appear on each row and
   // clicking toggles the session in/out of `selectedForMerge` instead of
   // navigating. Hitting Merge button calls the API; backend infers
@@ -26,14 +39,6 @@ export default function LeftPanel() {
   const [mergeMode, setMergeMode] = useState(false)
   const [selectedForMerge, setSelectedForMerge] = useState<Set<string>>(new Set())
   const [merging, setMerging] = useState(false)
-
-  // Refresh project list on every route change so titles, statuses, and
-  // newly-created sessions show up without a page reload.
-  useEffect(() => {
-    void listProjects()
-      .then((res) => setProjects(res.projects))
-      .catch((e) => console.error('Failed to fetch projects:', e))
-  }, [location.pathname])
 
   // Cmd+K — quick "new chat" shortcut. 1:1 model: a new chat is a new project.
   useEffect(() => {
@@ -51,11 +56,12 @@ export default function LeftPanel() {
   const handleNewProject = async () => {
     try {
       const created = await createProject()
-      // The freshly-created project ships with a session ID — jump straight
-      // into the chat instead of leaving the user on a placeholder.
-      setProjects((prev) => [
-        ...prev,
-        {
+      // Patch the cache so the row appears immediately, then navigate.
+      // A background refetch runs anyway thanks to the cache TTL, so any
+      // server-side fields we omit here will be filled in shortly.
+      queryClient.setQueryData<typeof projectsQuery.data>(queryKeys.projects, (cur) => {
+        if (!cur) return cur
+        const newRow: ProjectItem = {
           project_id: created.project_id,
           name: created.name,
           system_prompt: created.system_prompt ?? null,
@@ -66,8 +72,10 @@ export default function LeftPanel() {
           status: null,
           unread_message_count: 0,
           is_shared: false,
-        },
-      ])
+        }
+        return { ...cur, projects: [...cur.projects, newRow] }
+      })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.projects })
       navigate(`/chat/${created.session_id}`)
     } catch (e) {
       console.error('Failed to create project:', e)
@@ -76,16 +84,23 @@ export default function LeftPanel() {
   }
 
   const handleProjectDeleted = (projectId: string) =>
-    setProjects((prev) => prev.filter((p) => p.project_id !== projectId))
+    queryClient.setQueryData<typeof projectsQuery.data>(queryKeys.projects, (cur) =>
+      cur ? { ...cur, projects: cur.projects.filter((p) => p.project_id !== projectId) } : cur,
+    )
 
   const handleProjectRenamed = (projectId: string, name: string) =>
-    setProjects((prev) =>
+    queryClient.setQueryData<typeof projectsQuery.data>(queryKeys.projects, (cur) =>
       // Mirror the backend: update both `name` and `title`. The sidebar
-      // label is `title || name`, so leaving an old auto-derived title
-      // in place would mask the user's rename until the next reload.
-      prev.map((p) =>
-        p.project_id === projectId ? { ...p, name, title: name } : p,
-      ),
+      // label is `title || name`, so leaving an old auto-derived title in
+      // place would mask the user's rename until the next reload.
+      cur
+        ? {
+            ...cur,
+            projects: cur.projects.map((p) =>
+              p.project_id === projectId ? { ...p, name, title: name } : p,
+            ),
+          }
+        : cur,
     )
 
   const handleListScroll = () => {
