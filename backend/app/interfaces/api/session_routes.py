@@ -4,6 +4,7 @@ from typing import AsyncGenerator, List, Optional
 from sse_starlette.event import ServerSentEvent
 from datetime import datetime
 import asyncio
+import json
 import websockets
 import logging
 from app.interfaces.dependencies import get_file_service
@@ -34,7 +35,6 @@ from app.domain.models.file import FileInfo
 from app.domain.models.user import User
 
 logger = logging.getLogger(__name__)
-SESSION_POLL_INTERVAL = 5
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -229,32 +229,6 @@ async def get_all_sessions(
     ]
     return APIResponse.success(ListSessionResponse(sessions=session_items))
 
-@router.post("")
-async def stream_sessions(
-    current_user: User = Depends(get_current_user),
-    agent_service: AgentService = Depends(get_agent_service)
-) -> EventSourceResponse:
-    async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
-        while True:
-            summaries = await agent_service.get_all_sessions(current_user.id)
-            session_items = [
-                ListSessionItem(
-                    session_id=s.id,
-                    title=s.title,
-                    status=s.status,
-                    unread_message_count=s.unread_message_count,
-                    latest_message=s.latest_message,
-                    latest_message_at=int(s.latest_message_at.timestamp()) if s.latest_message_at else None,
-                    is_shared=s.is_shared
-                ) for s in summaries
-            ]
-            yield ServerSentEvent(
-                event="sessions",
-                data=ListSessionResponse(sessions=session_items).model_dump_json()
-            )
-            await asyncio.sleep(SESSION_POLL_INTERVAL)
-    return EventSourceResponse(event_generator())
-
 @router.post("/{session_id}/chat")
 async def chat(
     session_id: str,
@@ -264,21 +238,47 @@ async def chat(
 ) -> EventSourceResponse:
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         with bind_log_context(session_id=session_id, user_id=current_user.id):
-            async for event in agent_service.chat(
-                session_id=session_id,
-                user_id=current_user.id,
-                message=request.message,
-                timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
-                event_id=request.event_id,
-                attachments=request.attachments
-            ):
-                logger.debug(f"Received event from chat: {event}")
-                sse_event = await EventMapper.event_to_sse_event(event)
-                if sse_event:
-                    yield ServerSentEvent(
-                        event=sse_event.event,
-                        data=sse_event.data.model_dump_json() if sse_event.data else None
-                    )
+            try:
+                async for event in agent_service.chat(
+                    session_id=session_id,
+                    user_id=current_user.id,
+                    message=request.message,
+                    timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
+                    event_id=request.event_id,
+                    attachments=request.attachments
+                ):
+                    logger.debug(f"Received event from chat: {event}")
+                    sse_event = await EventMapper.event_to_sse_event(event)
+                    if sse_event:
+                        yield ServerSentEvent(
+                            event=sse_event.event,
+                            data=sse_event.data.model_dump_json() if sse_event.data else None
+                        )
+            except asyncio.CancelledError:
+                # Client disconnected — let the cancellation propagate so
+                # the underlying chat() generator runs its finally blocks.
+                raise
+            except Exception as e:
+                # Surface fatal errors as a final SSE event so the FE shows
+                # the user a real message instead of a transport-level
+                # "stream closed unexpectedly" toast. Then close cleanly.
+                logger.exception("chat SSE generator crashed")
+                error_payload = {
+                    "event_id": "0",
+                    "timestamp": int(datetime.now().timestamp()),
+                    "error": f"{type(e).__name__}: {e}" or "Internal error",
+                }
+                yield ServerSentEvent(
+                    event="error",
+                    data=json.dumps(error_payload),
+                )
+                yield ServerSentEvent(
+                    event="done",
+                    data=json.dumps({
+                        "event_id": "0",
+                        "timestamp": int(datetime.now().timestamp()),
+                    }),
+                )
 
     return EventSourceResponse(event_generator())
 

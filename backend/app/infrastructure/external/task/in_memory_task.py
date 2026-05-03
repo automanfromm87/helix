@@ -98,7 +98,31 @@ class InMemoryTask(Task):
 
     def _on_task_done(self) -> None:
         if self._runner:
-            asyncio.create_task(self._runner.on_done(self))
+            # Strong-ref the on_done coroutine via the same _live_execution_tasks
+            # set used for the main run task. Without it, asyncio's weak refs
+            # let the on_done callback get GC'd mid-execution — the runner
+            # never completes its post-task cleanup (DB row finalisation,
+            # sandbox unbinding) and the next session restore sees a stuck
+            # RUNNING state.
+            t = asyncio.create_task(
+                self._runner.on_done(self),
+                name=f"task-{self._id}-on-done",
+            )
+            InMemoryTask._live_execution_tasks.add(t)
+
+            def _on_complete(done_t: asyncio.Task) -> None:
+                InMemoryTask._live_execution_tasks.discard(done_t)
+                if done_t.cancelled():
+                    return
+                err = done_t.exception()
+                if err is not None:
+                    logger.error(
+                        "Task %s on_done callback failed",
+                        self._id,
+                        exc_info=(type(err), err, err.__traceback__),
+                    )
+
+            t.add_done_callback(_on_complete)
         self._cleanup_registry()
 
     def _cleanup_registry(self) -> None:

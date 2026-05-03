@@ -242,8 +242,8 @@ async def lifespan(app: FastAPI):
             logger.info("AgentService shutdown completed successfully")
         except asyncio.TimeoutError:
             logger.warning("AgentService shutdown timed out after 30 seconds")
-        except Exception as e:
-            logger.error(f"Error during AgentService cleanup: {e}")
+        except Exception:
+            logger.exception("Error during AgentService cleanup")
 
 
 app = FastAPI(title="Helix AI Agent", lifespan=lifespan)

@@ -600,7 +600,19 @@ class BaseAgent(ABC):
                 if use.id not in invocation_results:
                     continue  # guarded out (paused)
                 tool = self.get_tool(use.name)
-                assert tool is not None
+                if tool is None:
+                    # Should be impossible — every entry in invocation_results
+                    # came from `runnable`, which is only populated after
+                    # get_tool() returned non-None earlier in the loop. But
+                    # `assert` strips under -O and a real None would crash with
+                    # `AssertionError` in dev / `AttributeError` in prod.
+                    # Skip the row instead and log so we'd notice if invariant
+                    # ever broke.
+                    logger.warning(
+                        "tool %s disappeared between phase 1 and phase 3 "
+                        "(invariant violation, skipping)", use.name,
+                    )
+                    continue
                 result = invocation_results[use.id]
                 logger.info(
                     "tool_done agent=%s name=%s success=%s",

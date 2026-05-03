@@ -303,7 +303,13 @@ class DockerSandbox(Sandbox):
             )
             
         except Exception as e:
-            raise Exception(f"Failed to create Docker sandbox: {str(e)}")
+            # Preserve the original docker SDK exception type + traceback.
+            # `raise from e` keeps the cause chain so operators can see the
+            # actual culprit (ImagePullError, PortAllocation, NotFound, …)
+            # instead of a flat "Failed to create Docker sandbox" message.
+            raise SandboxUnavailableError(
+                f"Failed to create Docker sandbox: {type(e).__name__}: {e}"
+            ) from e
 
     async def ensure_sandbox(self) -> None:
         """Ensure sandbox is ready by checking that all services are RUNNING"""
@@ -363,11 +369,18 @@ class DockerSandbox(Sandbox):
                 logger.warning(f"Failed to check supervisor status (attempt {attempt + 1}/{max_retries}): {str(e)}")
                 await asyncio.sleep(retry_interval)
         
-        # If we reach here, we've exhausted all retries
-        error_message = f"Sandbox services failed to start after {max_retries} attempts ({max_retries * retry_interval} seconds)"
+        # All retries exhausted — surface as SandboxUnavailableError so the
+        # agent loop's existing handling (skip tool render, log INFO,
+        # propagate ToolResult with TOOL_RESULT_SANDBOX_UNAVAILABLE) takes
+        # over. Silently returning made callers think the sandbox was
+        # ready and the next operation always failed with confusing
+        # secondary errors.
+        error_message = (
+            f"Sandbox services failed to start after {max_retries} attempts "
+            f"({max_retries * retry_interval} seconds)"
+        )
         logger.error(error_message)
-        # TODO: find a way to handle this
-        #raise Exception(error_message)
+        raise SandboxUnavailableError(error_message)
 
     async def exec_command(self, session_id: str, exec_dir: str, command: str) -> ToolResult:
         response = await self.client.post(

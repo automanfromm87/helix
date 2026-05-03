@@ -12,9 +12,35 @@ import urllib.parse
 logger = logging.getLogger(__name__)
 
 
+# Process-wide blacklist of revoked JWT IDs.
+#
+# Stored as `{jti_or_token_hash: expires_unix_ts}`. Verification rejects any
+# token whose key is present and not yet expired. Entries past their expiry
+# are pruned lazily on each access — no background sweeper.
+#
+# In-memory means revocation is per-process: in a multi-replica deployment
+# the blacklist needs to move to Redis (TODO when we go multi-replica).
+# But "no revocation at all" was strictly worse than "revocation works in
+# the common single-replica case" — this is the smallest fix that actually
+# blocks a stolen-then-revoked token within the same process.
+_REVOKED_TOKENS: Dict[str, int] = {}
+
+
+def _token_key(token: str) -> str:
+    """Identifier used to look up a revocation. Hashing avoids holding the
+    raw JWT in memory and keeps log lines free of credential material."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _prune_expired_revocations(now_ts: int) -> None:
+    expired = [k for k, exp in _REVOKED_TOKENS.items() if exp <= now_ts]
+    for k in expired:
+        _REVOKED_TOKENS.pop(k, None)
+
+
 class TokenService:
     """Token manager for authentication and URL signing"""
-    
+
     def __init__(self):
         self.settings = get_settings()
     
@@ -42,8 +68,8 @@ class TokenService:
             )
             logger.debug(f"Created access token for user: {user.fullname}")
             return token
-        except Exception as e:
-            logger.error(f"Failed to create access token: {e}")
+        except Exception:
+            logger.exception("Failed to create access token")
             raise
     
     def create_refresh_token(self, user: User) -> str:
@@ -67,25 +93,32 @@ class TokenService:
             )
             logger.debug(f"Created refresh token for user: {user.fullname}")
             return token
-        except Exception as e:
-            logger.error(f"Failed to create refresh token: {e}")
+        except Exception:
+            logger.exception("Failed to create refresh token")
             raise
     
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
         """Verify JWT token and return payload"""
+        # Reject revoked tokens up-front so logout/blacklist takes effect
+        # immediately for the rest of the token's nominal lifetime.
+        now_ts = int(datetime.now(UTC).timestamp())
+        _prune_expired_revocations(now_ts)
+        if _token_key(token) in _REVOKED_TOKENS:
+            logger.info("Token rejected: present in revocation list")
+            return None
         try:
             payload = jwt.decode(
                 token,
                 self.settings.jwt_secret_key,
                 algorithms=[self.settings.jwt_algorithm]
             )
-            
+
             # Check if token is not expired
             exp = payload.get("exp")
-            if exp and exp < int(datetime.now(UTC).timestamp()):
+            if exp and exp < now_ts:
                 logger.warning("Token has expired")
                 return None
-            
+
             logger.debug(f"Token verified for user: {payload.get('fullname')}")
             return payload
             
@@ -93,10 +126,13 @@ class TokenService:
             logger.warning("Token has expired")
             return None
         except jwt.InvalidTokenError as e:
-            logger.warning(f"Invalid token: {e}")
+            # Keep this terse — invalid-token noise floods logs in normal
+            # operation (expired creds in browser tabs, bots, etc.). Don't
+            # need exc_info here.
+            logger.warning("Invalid token: %s", e)
             return None
-        except Exception as e:
-            logger.error(f"Token verification failed: {e}")
+        except Exception:
+            logger.exception("Token verification failed")
             return None
     
     def get_user_from_token(self, token: str) -> Optional[Dict[str, Any]]:
@@ -160,15 +196,34 @@ class TokenService:
             )
             logger.debug(f"Created resource access token for {resource_type}: {resource_id}, user: {user_id}")
             return token
-        except Exception as e:
-            logger.error(f"Failed to create resource access token: {e}")
+        except Exception:
+            logger.exception("Failed to create resource access token")
             raise
 
     def revoke_token(self, token: str) -> bool:
-        """Revoke token (placeholder for token blacklist implementation)"""
-        # TODO:In a real implementation, you would add the token to a blacklist
-        # stored in Redis or database with expiration time
-        logger.warning(f"Token revoked (placeholder implementation)")
+        """Add the token to the in-memory revocation blacklist until its
+        natural expiry. Verification rejects revoked tokens immediately.
+
+        Returns False if the token can't be parsed (already-invalid tokens
+        don't need revocation; the caller can treat as no-op).
+        """
+        try:
+            # Decode WITHOUT validating signature/expiry — we only need the
+            # exp claim to know how long to keep the entry, and we want to
+            # accept already-expired tokens as a no-op rather than refuse
+            # to revoke them.
+            payload = jwt.decode(token, options={"verify_signature": False})
+        except jwt.InvalidTokenError as e:
+            logger.info("revoke_token called with un-parseable token: %s", e)
+            return False
+        exp = payload.get("exp")
+        if not isinstance(exp, int):
+            # No expiry on the token — fall back to a 24h cap so the entry
+            # doesn't live forever if this code path is exercised by a
+            # caller that hands us a malformed token.
+            exp = int(datetime.now(UTC).timestamp()) + 24 * 3600
+        _REVOKED_TOKENS[_token_key(token)] = exp
+        logger.info("Token revoked (sub=%s, type=%s)", payload.get("sub"), payload.get("type"))
         return True
 
     def create_signed_url(self, base_url: str, expire_minutes: int = 60) -> str:
@@ -280,6 +335,6 @@ class TokenService:
             logger.debug(f"Signed URL verified for: {base_url}")
             return True
             
-        except Exception as e:
-            logger.error(f"Signed URL verification failed: {e}")
+        except Exception:
+            logger.exception("Signed URL verification failed")
             return False

@@ -50,10 +50,15 @@ class AuthService:
             # Generate hash with extracted salt
             generated_hash = self._hash_password(password)
 
-            logger.info(f"Generated hash: {generated_hash} vs expected hash: {password_hash}")
-            return generated_hash == password_hash
-        except Exception as e:
-            logger.error(f"Password verification error: {e}")
+            # SECURITY: never log password hashes — even one-way hashes give
+            # an attacker who reads logs an offline brute-force target, and
+            # logging both sides side-by-side reveals login success/failure
+            # without needing the plaintext. Just trace the outcome.
+            ok = generated_hash == password_hash
+            logger.debug("Password verification: %s", "ok" if ok else "mismatch")
+            return ok
+        except Exception:
+            logger.exception("Password verification error")
             return False
     
     def _generate_user_id(self) -> str:

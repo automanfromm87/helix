@@ -40,8 +40,8 @@ class Postgres:
             async with self._engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
             logger.info("Successfully connected to Postgres")
-        except Exception as e:
-            logger.error(f"Failed to connect to Postgres: {e}")
+        except Exception:
+            logger.exception("Failed to connect to Postgres")
             raise
 
     async def shutdown(self) -> None:

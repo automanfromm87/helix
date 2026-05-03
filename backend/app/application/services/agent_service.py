@@ -1,4 +1,5 @@
-from typing import AsyncGenerator, Optional, List
+from typing import AsyncGenerator, Optional, List, Set
+import asyncio
 import logging
 from datetime import datetime
 from app.application.errors.exceptions import NotFoundError, SandboxUnavailableError
@@ -75,7 +76,39 @@ class AgentService:
         )
         self._search_engine = search_engine
         self._sandbox_cls = sandbox_cls
-    
+        # Strong refs for fire-and-forget background tasks. asyncio's event
+        # loop only keeps weak references to bare `create_task()` results,
+        # so without this the task can be GC'd mid-execution. Each task
+        # discards itself on completion via the done-callback.
+        self._background_tasks: Set[asyncio.Task] = set()
+
+    def _spawn_background(self, coro, *, name: Optional[str] = None) -> asyncio.Task:
+        """Run `coro` as a tracked background task.
+
+        Holds a strong reference until the task completes so the event
+        loop can't GC it mid-flight. Logs any unhandled exception so
+        silent failures show up in the same place as the rest of the
+        service's logs.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+
+        def _on_done(t: asyncio.Task) -> None:
+            self._background_tasks.discard(t)
+            if t.cancelled():
+                return
+            err = t.exception()
+            if err is not None:
+                logger.error(
+                    "Background task %s failed",
+                    t.get_name(),
+                    exc_info=(type(err), err, err.__traceback__),
+                )
+
+        task.add_done_callback(_on_done)
+        return task
+
+
     async def create_session(
         self,
         user_id: str,
@@ -169,8 +202,6 @@ class AgentService:
         # sandbox brings up vite on its own once the container's alive,
         # and PreviewToolView's auto-poll catches the URL the moment
         # the dev server is reachable.
-        import asyncio as _asyncio
-
         async def _spawn_sandbox_bg() -> None:
             try:
                 # Through the registry so concurrent recreate paths
@@ -185,7 +216,10 @@ class AgentService:
                     new_session.id,
                 )
 
-        _asyncio.create_task(_spawn_sandbox_bg())
+        self._spawn_background(
+            _spawn_sandbox_bg(),
+            name=f"fork-sandbox-spawn-{new_session.id}",
+        )
 
         logger.info(
             "Forked session %s from %s @ plan %s (branch %s) — sandbox spawning",
@@ -308,7 +342,6 @@ class AgentService:
         """Best-effort: stop+remove the sandbox container and wipe the
         host bind-mount dir. Failures are logged, not raised — the DB
         delete must still proceed so the user's UI stays consistent."""
-        import asyncio
         import shutil
         from pathlib import Path
 

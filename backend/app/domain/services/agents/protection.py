@@ -110,6 +110,19 @@ class LLMTransportError(LLMError):
         return f"Network problem reaching the model: {self}"
 
 
+class LLMSDKAssertionError(LLMTransportError):
+    """The Anthropic SDK's stream parser hit an internal assertion on a
+    response we received. Almost always retryable on the same prompt;
+    distinct subclass so the user message can say so directly instead of
+    blaming the network."""
+
+    def user_message(self) -> str:
+        return (
+            "The model SDK choked on the streamed response. "
+            f"Auto-retried but ran out of attempts. Detail: {self}"
+        )
+
+
 class LLMRateLimitError(LLMError):
     """HTTP 429 — exceeded RPM/TPM. Caller MUST honor `retry_after`."""
     retryable = True
@@ -192,7 +205,7 @@ def classify_api_exception(exc: BaseException) -> LLMError:
     # classify as a retryable transport error but with the smallest backoff
     # so we don't burn three slow attempts on what's effectively a hiccup.
     if isinstance(exc, AssertionError):
-        return LLMTransportError(
+        return LLMSDKAssertionError(
             f"SDK assertion: {exc!r}", cause=exc
         ).with_retry_after(0.5)
 

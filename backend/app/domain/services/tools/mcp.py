@@ -36,8 +36,8 @@ class MCPClientManager:
             await self._connect_servers()
             self._initialized = True
             logger.info("MCP client manager initialized")
-        except Exception as e:
-            logger.error(f"MCP client manager init failed: {e}")
+        except Exception:
+            logger.exception("MCP client manager init failed")
             raise
 
     async def _connect_servers(self):
@@ -48,8 +48,8 @@ class MCPClientManager:
                 continue
             try:
                 await self._connect_server(server_name, server_config)
-            except Exception as e:
-                logger.error(f"Failed to connect MCP server {server_name}: {e}")
+            except Exception:
+                logger.exception("Failed to connect MCP server %s", server_name)
 
     async def _connect_server(self, server_name: str, server_config: MCPServerConfig):
         transport_type = server_config.transport
@@ -119,8 +119,8 @@ class MCPClientManager:
             response = await session.list_tools()
             self._tools_cache[server_name] = response.tools if response else []
             logger.info(f"MCP server {server_name} exposes {len(self._tools_cache[server_name])} tools")
-        except Exception as e:
-            logger.error(f"Failed to list tools for {server_name}: {e}")
+        except Exception:
+            logger.exception("Failed to list tools for %s", server_name)
             self._tools_cache[server_name] = []
 
     def all_tools(self) -> List[tuple[str, MCPRemoteTool]]:
@@ -170,7 +170,9 @@ class MCPClientManager:
                 data="\n".join(content_parts) if content_parts else "OK",
             )
         except Exception as e:
-            logger.error(f"MCP tool call {public_tool_name} failed: {e}")
+            # Keep `e` here — the message gets surfaced to the agent via
+            # ToolResult.message and we want it informative.
+            logger.exception("MCP tool call %s failed", public_tool_name)
             return ToolResult(success=False, message=f"MCP tool failed: {e}")
 
     async def cleanup(self):
@@ -179,8 +181,8 @@ class MCPClientManager:
             self._clients.clear()
             self._tools_cache.clear()
             self._initialized = False
-        except Exception as e:
-            logger.error(f"MCP cleanup failed: {e}")
+        except Exception:
+            logger.exception("MCP cleanup failed")
 
 
 class MCPToolkit(BaseToolkit):
