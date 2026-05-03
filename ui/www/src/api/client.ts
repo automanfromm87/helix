@@ -1,4 +1,8 @@
-import axios, { AxiosError } from 'axios'
+import axios, {
+  AxiosError,
+  type AxiosRequestConfig,
+  type InternalAxiosRequestConfig,
+} from 'axios'
 import { fetchEventSource, type EventSourceMessage } from '@microsoft/fetch-event-source'
 
 import {
@@ -8,8 +12,23 @@ import {
   storeToken,
 } from './auth'
 
+// Module-augment axios so we can stop sprinkling `as any` to attach the two
+// flags the refresh interceptor needs.
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /** Marks the refresh-token request itself, so the interceptor doesn't try to refresh again on its 401. */
+    __isRefreshRequest?: boolean
+    /** Marks an original request that has already been retried once after a refresh. */
+    _retry?: boolean
+  }
+}
+
+interface ImportMetaEnv {
+  VITE_API_URL?: string
+}
+
 export const API_CONFIG = {
-  host: (import.meta as any).env?.VITE_API_URL || '',
+  host: (import.meta as unknown as { env?: ImportMetaEnv }).env?.VITE_API_URL || '',
   version: 'v1',
   timeout: 30_000,
 }
@@ -36,6 +55,17 @@ export const apiClient = axios.create({
   baseURL: BASE_URL,
   timeout: API_CONFIG.timeout,
   headers: { 'Content-Type': 'application/json' },
+})
+
+/**
+ * Per-call timeout override for known-long server operations (fork,
+ * fork-many, large URL ingestion). Use as the third arg to apiClient
+ * verbs instead of inlining `{ timeout: 5 * 60 * 1000 }` everywhere.
+ */
+export const LONG_OP_TIMEOUT_MS = 5 * 60 * 1000
+export const longOp = (overrides?: AxiosRequestConfig): AxiosRequestConfig => ({
+  timeout: LONG_OP_TIMEOUT_MS,
+  ...overrides,
 })
 
 apiClient.interceptors.request.use(
@@ -87,7 +117,7 @@ const refreshAuthToken = async (): Promise<string | null> => {
     const response = await apiClient.post(
       '/auth/refresh',
       { refresh_token: refreshToken },
-      { __isRefreshRequest: true } as any,
+      { __isRefreshRequest: true } satisfies AxiosRequestConfig,
     )
 
     if (response.data?.data) {
@@ -125,7 +155,7 @@ apiClient.interceptors.response.use(
     return response
   },
   async (error: AxiosError) => {
-    const originalRequest = error.config as any
+    const originalRequest = error.config as InternalAxiosRequestConfig | undefined
 
     if (originalRequest?.__isRefreshRequest) {
       const apiError: ApiError = {
@@ -153,13 +183,14 @@ apiClient.interceptors.response.use(
 
     if (error.response) {
       apiError.code = error.response.status
-      const data = error.response.data as any
+      const data = error.response.data
       if (data && typeof data === 'object') {
-        if (data.code && data.msg) {
-          apiError.code = data.code
-          apiError.message = data.msg
+        const body = data as { code?: number; msg?: string; message?: string }
+        if (typeof body.code === 'number' && body.msg) {
+          apiError.code = body.code
+          apiError.message = body.msg
         } else {
-          apiError.message = data.message || error.response.statusText || 'Request failed'
+          apiError.message = body.message || error.response.statusText || 'Request failed'
         }
         apiError.details = data
       } else {
@@ -186,104 +217,199 @@ export interface SSEOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   body?: unknown
   headers?: Record<string, string>
+  /**
+   * If no event arrives in this many ms while the stream is open, the
+   * connection is treated as dead and `onError` fires. sse-starlette keeps
+   * sockets alive with periodic comments, so this only trips when the
+   * underlying TCP/proxy is genuinely wedged. 0 disables.
+   */
+  idleTimeoutMs?: number
+  /**
+   * Whether to keep the connection alive when the tab is hidden. Defaults
+   * to true (chat needs it); subscription endpoints can opt out so a pile
+   * of background tabs doesn't pin one stream each.
+   */
+  openWhenHidden?: boolean
 }
 
-const handleSSEAuthError = async <T>(
-  callbacks: SSECallbacks<T>,
-): Promise<boolean> => {
-  try {
-    const newAccessToken = await refreshAuthToken()
-    if (newAccessToken) {
-      window.dispatchEvent(new CustomEvent('auth:token-refreshed'))
-      return true
-    }
-    return false
-  } catch (refreshError) {
-    callbacks.onError?.(refreshError as Error)
-    return false
+export interface SSEHandle {
+  cancel: () => void
+}
+
+/**
+ * Sentinel thrown from `onerror` to stop fetch-event-source's default
+ * reconnect loop. Without this, an `onerror` that doesn't throw silently
+ * triggers a retry, even after the caller has already torn down its
+ * UI state — the resurrected stream then pushes events into a half-dead
+ * controller.
+ */
+class SSEFatalError extends Error {}
+
+/** Build the headers used for an SSE request, attaching a fresh token. */
+const buildSSEHeaders = (extra: Record<string, string>): Record<string, string> => {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...extra,
   }
+  const token = getStoredToken()
+  if (token && !headers.Authorization) {
+    headers.Authorization = `Bearer ${token}`
+  }
+  return headers
 }
 
-/** Open an SSE connection. Returns a function that aborts the stream. */
-export const createSSEConnection = async <T = unknown>(
+/**
+ * Open an SSE connection. Returns synchronously with a `cancel` handle so
+ * callers can abort even before `onopen` fires (e.g. user clicks Stop in
+ * the small window between `chat()` issuing the request and the server
+ * acknowledging it).
+ *
+ * Lifecycle:
+ *   - `onopen`  fires once per successful (re)connection
+ *   - `onmessage` fires per parsed event; malformed JSON is logged and
+ *      dropped so a single bad chunk can't kill the whole stream
+ *   - `onclose` fires when the server cleanly ends the stream
+ *   - `onerror` fires for transport / parse / auth-refresh failures and
+ *      then the stream is torn down (no auto-reconnect — the caller can
+ *      decide whether to retry by opening a new connection).
+ */
+export const createSSEConnection = <T = unknown>(
   endpoint: string,
   options: SSEOptions = {},
   callbacks: SSECallbacks<T> = {},
-): Promise<() => void> => {
+): SSEHandle => {
   const { onOpen, onMessage, onClose, onError } = callbacks
-  const { method = 'GET', body, headers = {} } = options
+  const {
+    method = 'GET',
+    body,
+    headers = {},
+    idleTimeoutMs = 90_000,
+    openWhenHidden = true,
+  } = options
 
   const abortController = new AbortController()
   const apiUrl = `${BASE_URL}${endpoint}`
+  const serializedBody = body !== undefined ? JSON.stringify(body) : undefined
 
-  const requestHeaders: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...headers,
+  let closed = false
+  let idleTimer: ReturnType<typeof setTimeout> | null = null
+  // `auth:retried` guards against a refresh-loop: if a 401 fires immediately
+  // after we already refreshed and reconnected, treat it as fatal instead of
+  // looping forever.
+  let authRetried = false
+
+  const finish = (err?: Error) => {
+    if (closed) return
+    closed = true
+    if (idleTimer) {
+      clearTimeout(idleTimer)
+      idleTimer = null
+    }
+    abortController.abort()
+    if (err) onError?.(err)
+    else onClose?.()
   }
 
-  const token = getStoredToken()
-  if (token && !requestHeaders.Authorization) {
-    requestHeaders.Authorization = `Bearer ${token}`
+  const armIdle = () => {
+    if (!idleTimeoutMs) return
+    if (idleTimer) clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => {
+      finish(new Error(`SSE idle for ${idleTimeoutMs}ms`))
+    }, idleTimeoutMs)
   }
 
-  const createConnection = async (): Promise<void> => {
-    return new Promise((_resolve, reject) => {
-      if (abortController.signal.aborted) {
-        reject(new Error('Connection aborted'))
-        return
-      }
-
-      const ssePromise = fetchEventSource(apiUrl, {
-        method,
-        headers: requestHeaders,
-        openWhenHidden: true,
-        body: body ? JSON.stringify(body) : undefined,
-        signal: abortController.signal,
-        async onopen(response) {
-          if (response.status === 401) {
-            const refreshSuccess = await handleSSEAuthError(callbacks)
-            if (refreshSuccess) {
-              const newToken = getStoredToken()
-              if (newToken) {
-                requestHeaders.Authorization = `Bearer ${newToken}`
-                setTimeout(() => createConnection().catch(console.error), 1000)
-              }
-            }
-            return
-          }
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-          }
-          onOpen?.()
-        },
-        onmessage(event: EventSourceMessage) {
-          if (event.event && event.event.trim() !== '') {
-            onMessage?.({
-              event: event.event,
-              data: JSON.parse(event.data) as T,
-            })
-          }
-        },
-        onclose() {
-          onClose?.()
-        },
-        onerror(err: unknown) {
-          const error = err instanceof Error ? err : new Error(String(err))
-          console.error('EventSource error:', error)
-          onError?.(error)
-          reject(error)
-        },
-      })
-
-      ssePromise.catch(reject)
+  const runOnce = async (requestHeaders: Record<string, string>): Promise<void> => {
+    await fetchEventSource(apiUrl, {
+      method,
+      headers: requestHeaders,
+      openWhenHidden,
+      body: serializedBody,
+      signal: abortController.signal,
+      async onopen(response) {
+        if (response.status === 401) {
+          // Throw to break out of fetch-event-source — the outer driver
+          // catches, refreshes the token, and retries with fresh headers.
+          throw new SSEFatalError('unauthorized')
+        }
+        if (!response.ok) {
+          throw new SSEFatalError(`HTTP ${response.status}: ${response.statusText}`)
+        }
+        armIdle()
+        onOpen?.()
+      },
+      onmessage(event: EventSourceMessage) {
+        armIdle()
+        // SSE spec: when no `event:` field is present, the type defaults to
+        // 'message'. Don't drop those — backend servers (or proxies that
+        // strip event names) would otherwise go silent.
+        const eventName = event.event && event.event.trim() !== '' ? event.event : 'message'
+        if (event.data === '') return // pure keep-alive comments come through as empty
+        let data: T
+        try {
+          data = JSON.parse(event.data) as T
+        } catch (e) {
+          console.error('[SSE] dropped malformed event', { eventName, raw: event.data, e })
+          return
+        }
+        onMessage?.({ event: eventName, data })
+      },
+      onclose() {
+        // Server cleanly ended the stream — propagate as close, not error.
+        finish()
+      },
+      onerror(err: unknown) {
+        // Re-throw to terminate fetch-event-source's internal retry loop.
+        // The outer try/catch promotes it to onError on the SSE handle.
+        throw err instanceof Error ? err : new Error(String(err))
+      },
     })
   }
 
-  createConnection().catch((error) => {
-    if (!abortController.signal.aborted) {
-      console.error('SSE connection failed:', error)
+  const drive = async () => {
+    let err: unknown
+    try {
+      await runOnce(buildSSEHeaders(headers))
+      finish()
+      return
+    } catch (e) {
+      err = e
     }
-  })
+    if (closed || abortController.signal.aborted) return
 
-  return () => abortController.abort()
+    // 401 → refresh once, then reconnect with fresh headers. Any other
+    // error (or a second 401) is terminal.
+    if (err instanceof SSEFatalError && err.message === 'unauthorized' && !authRetried) {
+      authRetried = true
+      try {
+        const newToken = await refreshAuthToken()
+        if (!newToken) {
+          finish(new Error('Token refresh failed'))
+          return
+        }
+        window.dispatchEvent(new CustomEvent('auth:token-refreshed'))
+      } catch (refreshErr) {
+        finish(refreshErr instanceof Error ? refreshErr : new Error(String(refreshErr)))
+        return
+      }
+      if (closed || abortController.signal.aborted) return
+      try {
+        await runOnce(buildSSEHeaders(headers))
+        finish()
+      } catch (retryErr) {
+        if (closed || abortController.signal.aborted) return
+        finish(retryErr instanceof Error ? retryErr : new Error(String(retryErr)))
+      }
+      return
+    }
+
+    const wrapped = err instanceof Error ? err : new Error(String(err))
+    console.error('[SSE] error', wrapped)
+    finish(wrapped)
+  }
+
+  void drive()
+
+  return {
+    cancel: () => finish(),
+  }
 }

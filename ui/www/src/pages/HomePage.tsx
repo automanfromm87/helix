@@ -11,6 +11,7 @@ import { getCachedClientConfig } from '@/api/config'
 import { useAuth } from '@/hooks/useAuth'
 import { useFilePanel } from '@/hooks/useFilePanel'
 import { useLeftPanel } from '@/hooks/useLeftPanel'
+import { usePendingMessage } from '@/hooks/usePendingMessage'
 import { showErrorToast } from '@/utils/toast'
 import type { FileInfo } from '@/api/file'
 
@@ -72,9 +73,15 @@ export default function HomePage() {
         size: file.size,
         upload_date: file.upload_date,
       }))
-      navigate(`/chat/${project.session_id}`, {
-        state: { message, files },
+      // Stage the first message in module memory and navigate. ChatPage
+      // takes() it once on the matching sessionId, sidestepping the
+      // location.state double-consumption problem.
+      usePendingMessage.getState().set({
+        sessionId: project.session_id,
+        message,
+        files,
       })
+      navigate(`/chat/${project.session_id}`)
     } catch (e) {
       console.error('Failed to create project:', e)
       showErrorToast('Failed to create project, please try again later')

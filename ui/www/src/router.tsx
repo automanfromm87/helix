@@ -15,8 +15,13 @@ import ComparePage from '@/pages/ComparePage'
 import MainLayout from '@/pages/MainLayout'
 import ShareLayout from '@/pages/ShareLayout'
 import SharePage from '@/pages/SharePage'
+import ErrorBoundary from '@/components/ErrorBoundary'
 import { getStoredToken } from '@/api/auth'
 import { getCachedClientConfig } from '@/api/config'
+
+const wrap = (scope: string, node: ReactNode): ReactNode => (
+  <ErrorBoundary scope={scope}>{node}</ErrorBoundary>
+)
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const location = useLocation()
@@ -73,7 +78,7 @@ export const router = createBrowserRouter(
           </RequireAuth>
         }
       >
-        <Route index element={<HomePage />} />
+        <Route index element={wrap('home', <HomePage />)} />
       </Route>
       <Route
         path="/chat"
@@ -83,8 +88,8 @@ export const router = createBrowserRouter(
           </RequireAuth>
         }
       >
-        <Route index element={<HomePage />} />
-        <Route path=":sessionId" element={<ChatPage />} />
+        <Route index element={wrap('home', <HomePage />)} />
+        <Route path=":sessionId" element={wrap('chat', <ChatPage />)} />
       </Route>
       <Route
         path="/home"
@@ -94,19 +99,17 @@ export const router = createBrowserRouter(
           </RequireAuth>
         }
       >
-        <Route index element={<HomePage />} />
+        <Route index element={wrap('home', <HomePage />)} />
       </Route>
 
       <Route path="/share" element={<ShareLayout />}>
-        <Route path=":sessionId" element={<SharePage />} />
+        <Route path=":sessionId" element={wrap('share', <SharePage />)} />
       </Route>
 
       <Route
         path="/compare"
         element={
-          <RequireAuth>
-            <ComparePage />
-          </RequireAuth>
+          <RequireAuth>{wrap('compare', <ComparePage />)}</RequireAuth>
         }
       />
 

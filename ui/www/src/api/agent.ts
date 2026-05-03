@@ -2,8 +2,10 @@ import {
   apiClient,
   API_CONFIG,
   createSSEConnection,
+  longOp,
   type ApiResponse,
   type SSECallbacks,
+  type SSEHandle,
 } from './client'
 import type { AgentSSEEvent } from '@/types/event'
 import type {
@@ -51,12 +53,6 @@ export async function searchSessions(query: string): Promise<ListSessionResponse
     params: { q: query },
   })
   return response.data.data
-}
-
-export async function getSessionsSSE(
-  callbacks?: SSECallbacks<ListSessionResponse>,
-): Promise<() => void> {
-  return createSSEConnection<ListSessionResponse>('/sessions', { method: 'POST' }, callbacks)
 }
 
 export interface PlanItem {
@@ -111,16 +107,15 @@ export async function restorePlan(planId: string): Promise<boolean> {
 }
 
 export async function forkPlan(planId: string): Promise<string> {
-  // Per-request timeout overrides the apiClient default (30s). Fork copies
-  // the project tree (`shutil.copytree`, excluding node_modules but still
-  // potentially many files) and on a busy host with several concurrent
-  // sandbox lifecycle ops in flight the response can take 1-2 minutes.
-  // 30s default would surface as a spurious "Network error" toast even
-  // though the server completes the fork — leaving the user with an
-  // orphan session they didn't know was created.
+  // Long-op timeout: fork copies the project tree (`shutil.copytree`,
+  // excluding node_modules but still many files) and on a busy host with
+  // several concurrent sandbox lifecycle ops in flight the response can
+  // take 1-2 minutes. The default 30s would surface as a spurious "Network
+  // error" toast even though the server completes the fork — leaving the
+  // user with an orphan session they didn't know was created.
   const response = await apiClient.post<
     ApiResponse<{ plan_id: string; new_session_id: string }>
-  >(`/plans/${planId}/fork`, undefined, { timeout: 5 * 60 * 1000 })
+  >(`/plans/${planId}/fork`, undefined, longOp())
   return response.data.data.new_session_id
 }
 
@@ -219,13 +214,13 @@ export const getShellStreamUrl = async (
   return `${wsBase}${signed.signed_url}`
 }
 
-export const chatWithSession = async (
+export const chatWithSession = (
   sessionId: string,
   message: string = '',
   eventId?: string,
   attachments?: { file_id: string; filename: string; content_type?: string; size?: number }[],
   callbacks?: SSECallbacks<AgentSSEEvent['data']>,
-): Promise<() => void> => {
+): SSEHandle => {
   return createSSEConnection<AgentSSEEvent['data']>(
     `/sessions/${sessionId}/chat`,
     {
@@ -355,9 +350,9 @@ export async function deleteContextFile(
 export async function uploadContextFileFromUrl(
   sessionId: string, url: string,
 ): Promise<ContextFileSummary> {
-  // 30s timeout — server fetches the URL synchronously and a slow
-  // upstream (huge docs page) would blow past axios default before the
-  // server gets a chance to return.
+  // Same as the default 30s, kept explicit because the server fetches the
+  // URL synchronously and a slow upstream (huge docs page) is the most
+  // likely culprit for timeouts on this endpoint.
   const r = await apiClient.post<ApiResponse<ContextFileSummary>>(
     `/sessions/${sessionId}/context-files/from-url`,
     { url },
@@ -402,7 +397,7 @@ export async function forkPlanMany(
   >(
     `/plans/${planId}/fork-many`,
     { count, labels: labels ?? null },
-    { timeout: 5 * 60 * 1000 },
+    longOp(),
   )
   return r.data.data.sessions
 }

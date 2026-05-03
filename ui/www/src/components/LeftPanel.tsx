@@ -138,9 +138,13 @@ export default function LeftPanel() {
             : (result.error || 'Merge failed'),
         )
       }
-    } catch (e: any) {
+    } catch (e) {
       console.error('merge failed', e)
-      showErrorToast(e?.response?.data?.message || 'Merge failed')
+      const msg =
+        e && typeof e === 'object' && 'message' in e && typeof (e as { message: unknown }).message === 'string'
+          ? (e as { message: string }).message
+          : 'Merge failed'
+      showErrorToast(msg)
     } finally {
       setMerging(false)
     }

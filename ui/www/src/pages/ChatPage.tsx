@@ -1,54 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useParams } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import {
-  ArrowDown,
-  Check,
-  FileSearch,
-  Globe,
-  Link as LinkIcon,
-  Lock,
-  PanelLeft,
-  Settings2,
-} from 'lucide-react'
+import { ArrowDown, FileSearch, PanelLeft, Settings2 } from 'lucide-react'
 
 import * as agentApi from '@/api/agent'
-import {
-  isConsecutiveAssistant,
-  type AttachmentsContent,
-  type Message,
-  type MessageContent,
-  type TaskContent,
-  type ToolContent,
-} from '@/types/message'
-import {
-  type AgentSSEEvent,
-  type ErrorEventData,
-  type MessageEventData,
-  type PlanEventData,
-  type TaskEventData,
-  type TitleEventData,
-  type ToolEventData,
-} from '@/types/event'
+import { isConsecutiveAssistant, type ToolContent } from '@/types/message'
 import type { FileInfo } from '@/api/file'
-import { SessionStatus } from '@/types/response'
 import ChatBox from '@/components/ChatBox'
 import ChatMessage from '@/components/ChatMessage'
 import LoadingIndicator from '@/components/ui/LoadingIndicator'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover'
 import PlanPanel from '@/components/PlanPanel'
 import PlanTimeline from '@/components/PlanTimeline'
 import SessionSettingsDialog from '@/components/SessionSettingsDialog'
-import { ShareIcon } from '@/components/icons'
+import ShareMenu from '@/components/ShareMenu'
 import { SimpleBar, type SimpleBarHandle } from '@/components/ui/SimpleBar'
 import ToolPanel, { type ToolPanelHandle } from '@/components/ToolPanel'
 import type { InspectorPayload } from '@/components/toolViews/PreviewToolView'
+import { useChatStream } from '@/hooks/useChatStream'
 import { useFilePanel } from '@/hooks/useFilePanel'
 import { useLeftPanel } from '@/hooks/useLeftPanel'
 import { useSessionFileList } from '@/hooks/useSessionFileList'
-import { copyToClipboard } from '@/utils/dom'
-import { showErrorToast, showSuccessToast } from '@/utils/toast'
-import { cn } from '@/lib/utils'
+import { showErrorToast } from '@/utils/toast'
 
 function inspectorContextBlock(p: InspectorPayload): string {
   const truncate = (s: string, max = 80) => (s.length > max ? `${s.slice(0, max)}…` : s)
@@ -71,566 +43,57 @@ function inspectorContextKey(p: InspectorPayload): string {
 }
 
 export default function ChatPage() {
-  const navigate = useNavigate()
-  const location = useLocation()
   const { sessionId: routeSessionId } = useParams<{ sessionId: string }>()
   const isLeftPanelShow = useLeftPanel((s) => s.isLeftPanelShow)
   const toggleLeftPanel = useLeftPanel((s) => s.toggleLeftPanel)
   const showSessionFileList = useSessionFileList((s) => s.showSessionFileList)
   const hideFilePanel = useFilePanel((s) => s.hideFilePanel)
 
-  const [inputMessage, setInputMessage] = useState('')
-  const [selectedContexts, setSelectedContexts] = useState<InspectorPayload[]>([])
-  const [isLoading, setIsLoading] = useState(false)
-  const [messages, setMessages] = useState<Message[]>([])
-  const [realTime, setRealTime] = useState(true)
-  const [follow, setFollow] = useState(true)
-  const [title, setTitle] = useState('New Chat')
-  const [plan, setPlan] = useState<PlanEventData | undefined>(undefined)
-  // History of all plans on this session, newest first. PlanPanel uses
-  // this to let the user step back through prior plans (each user turn
-  // typically creates a new Plan row — the current plan is just the
-  // newest entry, but earlier turns' plans are valuable context.)
-  const [planHistory, setPlanHistory] = useState<PlanEventData[]>([])
-  // Index into planHistory the user is currently viewing. 0 = newest
-  // (i.e. the live `plan`). When non-zero, PlanPanel shows the historical
-  // snapshot and we DON'T overlay live SSE updates onto it.
-  const [viewedPlanIndex, setViewedPlanIndex] = useState(0)
-  const [attachments, setAttachments] = useState<FileInfo[]>([])
-  const [shareMode, setShareMode] = useState<'private' | 'public'>('private')
-  const [linkCopied, setLinkCopied] = useState(false)
-  const [sharingLoading, setSharingLoading] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  // True after a `wait` SSE event arrived and the user hasn't replied
-  // yet — i.e. the agent paused on `message_ask_user`. Drives the
-  // ChatBox placeholder so the user sees "Reply to Helix's question"
-  // instead of the default "Give Helix a task to work on...".
-  // Cleared on any user submit (regardless of whether the wait was
-  // tied to that exact prompt — close enough; the agent will simply
-  // keep going with whatever the user said next).
-  const [awaitingReply, setAwaitingReply] = useState(false)
-
-  const lastNoMessageTool = useRef<ToolContent | undefined>()
-  const lastTool = useRef<ToolContent | undefined>()
-  const lastEventId = useRef<string | undefined>()
-  const cancelCurrentChat = useRef<(() => void) | null>(null)
-  const toolPanel = useRef<ToolPanelHandle>(null)
-  const initializedSessionRef = useRef<string | undefined>(undefined)
-  // Sync flag tracking whether a chat() invocation is already in flight
-  // for this session. Set the moment chat() starts, cleared when the SSE
-  // stream's onClose / onError fires. The ref is checked at the top of
-  // chat() so a second call (StrictMode remount, double-clicked Send,
-  // SSE reconnect race) is dropped before any HTTP POST is issued.
-  // Refs are stable across renders/remounts, so this works as a true
-  // single-token mutex without depending on async state propagation.
-  const chatInFlightRef = useRef(false)
-  // Tracks whether the initial nav-state message has already been
-  // consumed and kicked off chat(). React StrictMode double-mounts
-  // every component in dev, and `location.state` survives that double-
-  // mount unchanged — so without this guard, "build me a todo app"
-  // arriving via /chat/<id> navigation would fire chat() twice and
-  // create two parallel plans on the same session.
-  const navMessageConsumedRef = useRef(false)
-  const simpleBarRef = useRef<SimpleBarHandle>(null)
-  // True only while restoreSession is synchronously replaying historical
-  // events. Kept distinct from `realTime` (which also flips when the user
-  // clicks a tool to view history) so terminal events from a live agent
-  // still tear down the loading spinner correctly.
-  const replayingRef = useRef(false)
-
   const sessionId = routeSessionId
 
-  const isLastNoMessageTool = useCallback(
-    (tool: ToolContent) => tool.tool_call_id === lastNoMessageTool.current?.tool_call_id,
-    [],
-  )
+  // Page-local input/UI state. Everything chat-stream related (messages,
+  // plan, isLoading, etc.) lives in useChatStream so the page stays focused
+  // on layout and input handling.
+  const [inputMessage, setInputMessage] = useState('')
+  const [selectedContexts, setSelectedContexts] = useState<InspectorPayload[]>([])
+  const [follow, setFollow] = useState(true)
+  const [attachments, setAttachments] = useState<FileInfo[]>([])
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
-  const isLiveTool = useCallback(
-    (tool: ToolContent) => {
-      if (tool.status === 'calling') return true
-      if (!isLastNoMessageTool(tool)) return false
-      return tool.timestamp > Date.now() - 5 * 60 * 1000
-    },
-    [isLastNoMessageTool],
-  )
+  const toolPanel = useRef<ToolPanelHandle>(null)
+  const simpleBarRef = useRef<SimpleBarHandle>(null)
 
-  const handleMessageEvent = useCallback((data: MessageEventData) => {
-    setMessages((prev) => {
-      // Streaming: incremental emissions of the same logical assistant turn
-      // share `message_id`. Replace the existing bubble in place rather than
-      // appending a new one. The final emit (partial=false) freezes the text.
-      if (data.message_id) {
-        const idx = prev.findIndex(
-          (m) =>
-            m.type === data.role &&
-            (m.content as MessageContent).message_id === data.message_id,
-        )
-        if (idx >= 0) {
-          const next = [...prev]
-          next[idx] = { type: data.role, content: { ...data } as MessageContent } as Message
-          return next
-        }
-      }
-      // The backend occasionally re-emits an event with the same event_id —
-      // restoreSession replay overlapping with live SSE, multi-agent boundary
-      // acks, etc. Treat same (type, event_id) as the same row to avoid
-      // React duplicate-key warnings. event_id "00...000" placeholders are
-      // skipped here so unrelated rows that share the sentinel don't get
-      // collapsed into one.
-      const isPlaceholderId = (id?: string) => !id || /^0+$/.test(id)
-      if (!isPlaceholderId(data.event_id)) {
-        const idx = prev.findIndex(
-          (m) =>
-            m.type === data.role &&
-            (m.content as MessageContent).event_id === data.event_id,
-        )
-        if (idx >= 0) {
-          const next = [...prev]
-          next[idx] = { type: data.role, content: { ...data } as MessageContent } as Message
-          return next
-        }
-      }
-      const next = [
-        ...prev,
-        { type: data.role, content: { ...data } as MessageContent } as Message,
-      ]
-      if (data.attachments?.length > 0) {
-        next.push({ type: 'attachments', content: { ...data } as AttachmentsContent })
-      }
-      return next
-    })
-  }, [])
-
-  const handleToolEvent = useCallback(
-    (data: ToolEventData) => {
-      const toolContent: ToolContent = { ...data }
-
-      setMessages((prev) => {
-        const next = [...prev]
-        const existing = lastTool.current
-        if (existing && existing.tool_call_id === toolContent.tool_call_id) {
-          // mutate the last tool reference in-place across the message tree.
-          Object.assign(existing, toolContent)
-          return next.slice()
-        }
-        // Tools belong to the most recent in-flight task (status=running).
-        const lastTask = [...next].reverse().find((m) => m.type === 'task')?.content as
-          | TaskContent
-          | undefined
-        if (lastTask && lastTask.status === 'running') {
-          lastTask.tools.push(toolContent)
-        } else {
-          next.push({ type: 'tool', content: toolContent })
-        }
-        return next
-      })
-      lastTool.current = toolContent
-
-      if (toolContent.name !== 'message') {
-        lastNoMessageTool.current = toolContent
-        if (realTime) toolPanel.current?.showToolPanel(toolContent, true)
-      }
-    },
-    [realTime],
-  )
-
-  const handleTaskEvent = useCallback((data: TaskEventData) => {
-    setMessages((prev) => {
-      const next = [...prev]
-      // Each task gets exactly one bubble in the chat — find it and update,
-      // or insert if this is the first event for that task_id.
-      const idx = next.findIndex(
-        (m) =>
-          m.type === 'task' &&
-          (m.content as TaskContent).task_id === data.task_id,
-      )
-      if (idx >= 0) {
-        const existing = next[idx].content as TaskContent
-        Object.assign(existing, {
-          status: data.status,
-          title: data.title,
-          details: data.details,
-          result: data.result ?? existing.result,
-          error: data.error ?? existing.error,
-        })
-        return next.slice()
-      }
-      next.push({
-        type: 'task',
-        content: {
-          task_id: data.task_id,
-          plan_id: data.plan_id,
-          position: data.position,
-          title: data.title,
-          details: data.details ?? null,
-          status: data.status,
-          result: data.result ?? null,
-          error: data.error ?? null,
-          tools: [],
-          timestamp: data.timestamp,
-        } as TaskContent,
-      })
-      return next
-    })
-    // Mirror the per-task transition into the PlanPanel's snapshot. The
-    // backend only emits PlanEvent at plan-level transitions (EXECUTING
-    // start / COMPLETED / FAILED / replan), so without this the plan
-    // panel would show all tasks pending until the entire plan finished.
-    //
-    // Skip during replay: a session restore replays every event in order,
-    // which already includes the plan events that carry the canonical
-    // task statuses. Mirroring per-task during replay does N redundant
-    // setStates and stacks render pressure that has tripped React's
-    // "Maximum update depth" guard on long sessions.
-    if (replayingRef.current) return
-    setPlan((prev) => {
-      if (!prev || prev.plan_id !== data.plan_id) return prev
-      const idx = prev.tasks.findIndex((t) => t.task_id === data.task_id)
-      const merged: TaskEventData = {
-        ...(idx >= 0 ? prev.tasks[idx] : ({} as TaskEventData)),
-        ...data,
-      }
-      const tasks =
-        idx >= 0
-          ? prev.tasks.map((t, i) => (i === idx ? merged : t))
-          : [...prev.tasks, merged].sort((a, b) => a.position - b.position)
-      return { ...prev, tasks }
-    })
-  }, [])
-
-  const handleErrorEvent = useCallback((data: ErrorEventData) => {
-    setIsLoading(false)
-    // Surface errors as a clearly-marked assistant message so they don't blend
-    // in with normal output.
-    setMessages((prev) => [
-      ...prev,
-      {
-        type: 'assistant',
-        content: {
-          content: `**⚠️ Error**\n\n${data.error}`,
-          timestamp: data.timestamp,
-        } as MessageContent,
-      },
-    ])
-  }, [])
-
-  const handleEvent = useCallback(
-    (event: AgentSSEEvent) => {
-      switch (event.event) {
-        case 'message':
-          handleMessageEvent(event.data as MessageEventData)
-          break
-        case 'tool':
-          handleToolEvent(event.data as ToolEventData)
-          break
-        case 'task':
-          handleTaskEvent(event.data as TaskEventData)
-          break
-        case 'error':
-          handleErrorEvent(event.data as ErrorEventData)
-          break
-        case 'title':
-          setTitle((event.data as TitleEventData).title)
-          break
-        case 'plan': {
-          const planData = event.data as PlanEventData
-          setPlan(planData)
-          // Maintain the history list: replace if same plan_id (live
-          // updates to the active plan), prepend if new (a follow-up
-          // turn just produced a fresh plan).
-          setPlanHistory((prev) => {
-            const idx = prev.findIndex((p) => p.plan_id === planData.plan_id)
-            if (idx >= 0) {
-              const next = [...prev]
-              next[idx] = planData
-              return next
-            }
-            return [planData, ...prev]
-          })
-          // Snap viewer back to newest whenever a fresh plan arrives so
-          // the user sees the new live plan instead of being stuck on
-          // an older snapshot from the previous turn.
-          setViewedPlanIndex(0)
-          break
-        }
-        case 'done':
-        case 'wait':
-          // Explicit terminal events — sse-starlette keeps the SSE open with
-          // keep-alive pings, so onClose isn't reliable. Skip during replay
-          // so an old `done` event in session history doesn't cancel the
-          // brand-new chat() SSE that just started.
-          if (!replayingRef.current) {
-            setIsLoading(false)
-            cancelCurrentChat.current?.()
-            cancelCurrentChat.current = null
-            chatInFlightRef.current = false
-            // `wait` = agent paused for user input (message_ask_user).
-            // `done` = agent finished its turn — clear any prior wait
-            // flag in case the FE missed the transition.
-            setAwaitingReply(event.event === 'wait')
-          }
-          break
-        default:
-          break
-      }
-      lastEventId.current = event.data.event_id
-    },
-    [handleMessageEvent, handleToolEvent, handleTaskEvent, handleErrorEvent],
-  )
-
-  const chat = useCallback(
-    async (message = '', files: FileInfo[] = []) => {
-      if (!sessionId) return
-      // Synchronous in-flight guard. The check + set must happen before
-      // any await — otherwise two near-simultaneous callers (StrictMode
-      // remount, double-clicked Send button) both pass the check and
-      // both fire the HTTP POST, creating two parallel Plans on the
-      // server. The flag is cleared in onClose / onError / catch.
-      if (chatInFlightRef.current) {
-        console.debug('[chat] dropped duplicate invocation while in flight')
-        return
-      }
-      chatInFlightRef.current = true
-      cancelCurrentChat.current?.()
-      cancelCurrentChat.current = null
-
-      if (message.trim()) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            type: 'user',
-            content: {
-              content: message,
-              timestamp: Math.floor(Date.now() / 1000),
-            } as MessageContent,
-          },
-        ])
-      }
-      if (files.length > 0) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            type: 'attachments',
-            content: { role: 'user', attachments: files } as AttachmentsContent,
-          },
-        ])
-      }
-
-      setFollow(true)
+  const stream = useChatStream({
+    sessionId,
+    toolPanelRef: toolPanel,
+    onSessionChanged: () => {
       setInputMessage('')
       setAttachments([])
       setSelectedContexts([])
-      setIsLoading(true)
-
-      try {
-        const cancel = await agentApi.chatWithSession(
-          sessionId,
-          message,
-          lastEventId.current,
-          files.map((f) => ({
-            file_id: f.file_id,
-            filename: f.filename,
-            content_type: f.content_type,
-            size: f.size,
-          })),
-          {
-            onOpen: () => {
-              console.debug('[chat SSE] open')
-              setIsLoading(true)
-            },
-            onMessage: ({ event, data }) => {
-              console.debug('[chat SSE]', event, data)
-              handleEvent({
-                event: event as AgentSSEEvent['event'],
-                data: data as AgentSSEEvent['data'],
-              })
-            },
-            onClose: () => {
-              console.debug('[chat SSE] close')
-              setIsLoading(false)
-              cancelCurrentChat.current = null
-              chatInFlightRef.current = false
-            },
-            onError: (e) => {
-              console.error('[chat SSE] error', e)
-              setIsLoading(false)
-              cancelCurrentChat.current = null
-              chatInFlightRef.current = false
-            },
-          },
-        )
-        cancelCurrentChat.current = cancel
-      } catch (e) {
-        console.error('Chat error:', e)
-        setIsLoading(false)
-        cancelCurrentChat.current = null
-        chatInFlightRef.current = false
-      }
+      setFollow(true)
+      hideFilePanel()
     },
-    [sessionId, handleEvent],
-  )
+  })
+  const {
+    messages,
+    plan,
+    planHistory,
+    viewedPlanIndex,
+    setViewedPlanIndex,
+    title,
+    isLoading,
+    awaitingReply,
+    setAwaitingReply,
+    realTime,
+    setRealTime,
+    shareMode,
+    setShareMode,
+    lastNoMessageTool,
+    chat,
+    handleEditUserMessage,
+    isLiveTool,
+  } = stream
 
-  const handleEditUserMessage = useCallback(
-    async (eventId: string, newMessage: string) => {
-      if (!sessionId) return
-      // Drop everything from the edited message onward locally so the panel
-      // doesn't briefly show stale assistant output while the network call
-      // truncates server-side.
-      setMessages((prev) => {
-        const idx = prev.findIndex(
-          (m) => m.type === 'user' && (m.content as MessageContent).event_id === eventId,
-        )
-        return idx >= 0 ? prev.slice(0, idx) : prev
-      })
-      lastEventId.current = ''
-      lastTool.current = undefined
-      lastNoMessageTool.current = undefined
-      try {
-        await agentApi.regenerateFromMessage(sessionId, eventId, newMessage)
-      } catch (e) {
-        console.error('Failed to regenerate:', e)
-        showErrorToast('Failed to regenerate')
-        return
-      }
-      void chat(newMessage, [])
-    },
-    [sessionId, chat],
-  )
-
-  const restoreSession = useCallback(async () => {
-    if (!sessionId) return
-    try {
-      // Bound the initial replay to the most recent N events. Long-running
-      // sessions can accumulate thousands of events (8 MB+ payloads) which
-      // dominates first-paint time. The chat panel still renders correctly
-      // because virtualization + collapsible content keep visible work
-      // bounded, and 300 events is enough to show the user the recent
-      // context. Older history can be added via a future scroll-up loader.
-      const session = await agentApi.getSession(sessionId, { eventsLimit: 300 })
-      setShareMode(session.is_shared ? 'public' : 'private')
-      setRealTime(false)
-      // Fetch the full plan history (newest first) in parallel with the
-      // event replay. Without this, older plans don't surface because
-      // the bounded event window may not include their PlanEvent.
-      void agentApi.listSessionPlans(sessionId).then((plans) => {
-        if (plans.length === 0) return
-        // PlanItem from the API maps cleanly onto our PlanEventData
-        // shape (same keys; statuses share the literal union).
-        const mapped = plans.map((p) => ({
-          plan_id: p.plan_id,
-          title: p.title,
-          goal: p.goal,
-          status: p.status,
-          error: p.error,
-          commit_sha: p.commit_sha ?? null,
-          tasks: p.tasks.map((t) => ({
-            task_id: t.task_id,
-            plan_id: t.plan_id,
-            position: t.position,
-            title: t.title,
-            details: t.details,
-            status: t.status,
-            result: t.result,
-            error: t.error,
-            retries: t.retries,
-            timestamp: 0,
-          })) as TaskEventData[],
-          timestamp: 0,
-        })) as PlanEventData[]
-        setPlanHistory(mapped)
-        // If event replay hasn't already pinned a plan, default to the
-        // newest one so PlanPanel renders something on session restore.
-        setPlan((cur) => cur ?? mapped[0])
-      }).catch(() => {/* non-fatal */})
-      // Synchronous ref so the for-loop's done/wait events don't tear down
-      // the live chat connection. setState wouldn't apply until next render.
-      replayingRef.current = true
-      try {
-        for (const event of session.events) handleEvent(event)
-      } finally {
-        replayingRef.current = false
-      }
-      setRealTime(true)
-      // Surface the preview iframe by default — every session has one
-      // (sandbox port mapping is reserved at create time), and the user
-      // wants to see the running app first, not whatever the agent's
-      // last tool call was. Agent tool events later in the session will
-      // replace this with their own content; the Preview tab stays
-      // available in the dropdown.
-      toolPanel.current?.showToolPanel(
-        {
-          tool_call_id: `synthetic-preview-${sessionId}`,
-          name: 'preview',
-          function: '',
-          args: {},
-          status: 'called',
-          timestamp: Date.now(),
-        } as ToolContent,
-        false,
-      )
-      if (
-        session.status === SessionStatus.RUNNING ||
-        session.status === SessionStatus.PENDING
-      ) {
-        await chat()
-      }
-      void agentApi.clearUnreadMessageCount(sessionId)
-    } catch (e) {
-      console.error('Failed to restore session:', e)
-      showErrorToast('Session not found')
-    }
-  }, [sessionId, handleEvent, chat])
-
-  // Reset on session change. StrictMode-safe: bail when re-fired for the
-  // same session, otherwise the second mount would wipe the chatInFlight
-  // / navMessageConsumed guards and chat() would run twice.
-  useEffect(() => {
-    if (initializedSessionRef.current === sessionId) return
-    initializedSessionRef.current = sessionId
-
-    cancelCurrentChat.current?.()
-    cancelCurrentChat.current = null
-    // Clear in-flight + nav-consumption flags so the new session starts
-    // with a clean slate. Without this, navigating from one chat to
-    // another could leave the in-flight flag stuck if the prior SSE
-    // hadn't closed cleanly.
-    chatInFlightRef.current = false
-    navMessageConsumedRef.current = false
-    setMessages([])
-    setPlan(undefined)
-    setPlanHistory([])
-    setViewedPlanIndex(0)
-    setTitle('New Chat')
-    setAttachments([])
-    setSelectedContexts([])
-    setShareMode('private')
-    setLinkCopied(false)
-    setRealTime(true)
-    setFollow(true)
-    lastTool.current = undefined
-    lastNoMessageTool.current = undefined
-    lastEventId.current = undefined
-    toolPanel.current?.hideToolPanel()
-    hideFilePanel()
-
-    const navState = (location.state as { message?: string; files?: FileInfo[] } | null) ?? null
-    if (navState?.message && !navMessageConsumedRef.current) {
-      // StrictMode-safe: claim the consumption synchronously so the
-      // remount can't re-fire. window.history.replaceState alone isn't
-      // enough — React's location.state closure survives the cleanup.
-      navMessageConsumedRef.current = true
-      window.history.replaceState({}, document.title)
-      void chat(navState.message, navState.files ?? [])
-    } else if (!navState?.message) {
-      void restoreSession()
-    }
-
-    return () => {
-      cancelCurrentChat.current?.()
-      cancelCurrentChat.current = null
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId])
 
   // Auto-scroll on new message when in follow mode.
   //
@@ -701,7 +164,11 @@ export default function ChatPage() {
   }
 
   const handleStop = () => {
-    if (sessionId) void agentApi.stopSession(sessionId)
+    if (!sessionId) return
+    agentApi.stopSession(sessionId).catch((e) => {
+      console.error('Failed to stop session:', e)
+      showErrorToast('Failed to stop session')
+    })
   }
 
   const handleToolClick = (tool: ToolContent) => {
@@ -719,60 +186,36 @@ export default function ChatPage() {
     }
   }
 
-  const handleShareModeChange = async (mode: 'private' | 'public') => {
-    if (!sessionId || sharingLoading) return
-    if (shareMode === mode) {
-      setLinkCopied(false)
-      return
-    }
-    try {
-      setSharingLoading(true)
-      if (mode === 'public') await agentApi.shareSession(sessionId)
-      else await agentApi.unshareSession(sessionId)
-      setShareMode(mode)
-      setLinkCopied(false)
-    } catch (e) {
-      console.error('Error changing share mode:', e)
-      showErrorToast('Failed to change sharing settings')
-    } finally {
-      setSharingLoading(false)
-    }
-  }
-
-  const handleInstantShare = async () => {
-    if (!sessionId) return
-    setSharingLoading(true)
-    try {
-      await agentApi.shareSession(sessionId)
-      setShareMode('public')
-      setLinkCopied(false)
-    } catch (e) {
-      console.error('Error sharing session:', e)
-      showErrorToast('Failed to share session')
-    } finally {
-      setSharingLoading(false)
-    }
-  }
-
-  const handleCopyLink = async () => {
-    if (!sessionId) return
-    const shareUrl = `${window.location.origin}/share/${sessionId}`
-    const ok = await copyToClipboard(shareUrl)
-    if (ok) {
-      setLinkCopied(true)
-      window.setTimeout(() => setLinkCopied(false), 3000)
-      showSuccessToast('Link copied to clipboard')
-    } else {
-      showErrorToast('Failed to copy link')
-    }
-  }
-
   // Virtualize the message list so only items near the viewport are
   // mounted. Long sessions (3000+ events) previously rendered every
   // ChatMessage subtree at once — measurable seconds of mount + recurring
   // style-recalc on every state change. We hand the virtualizer
   // SimpleBar's scroll element so the existing scrollbar UX keeps working.
   const virtualParentRef = useRef<HTMLDivElement>(null)
+  // The virtualizer's scrollMargin is the distance from the scroll element's
+  // top to the start of the virtualized list (sticky header + PlanPanel).
+  // useVirtualizer captures the option value at hook-init time, so reading
+  // `virtualParentRef.current?.offsetTop` directly there always sees null on
+  // the first render and the list ended up offset by ~the header's height.
+  // Track it in state and let layout effects sync it once the DOM exists.
+  const [virtualScrollMargin, setVirtualScrollMargin] = useState(0)
+  useEffect(() => {
+    const update = () => {
+      const el = virtualParentRef.current
+      if (!el) return
+      setVirtualScrollMargin((cur) => (cur === el.offsetTop ? cur : el.offsetTop))
+    }
+    update()
+    const ro = new ResizeObserver(update)
+    if (virtualParentRef.current?.parentElement) {
+      ro.observe(virtualParentRef.current.parentElement)
+    }
+    window.addEventListener('resize', update)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', update)
+    }
+  }, [])
   const virtualizer = useVirtualizer({
     count: messages.length,
     getScrollElement: () => simpleBarRef.current?.getScrollElement() ?? null,
@@ -781,10 +224,7 @@ export default function ChatPage() {
     // estimated and measured sizes during streaming, which manifested as
     // bottom-of-list shifting around as `measureElement` corrected.
     estimateSize: () => 200,
-    // Account for sticky header / plan panel / inner padding above the
-    // virtualized list — items position relative to scrollMargin so the
-    // first item lines up correctly under the sticky region.
-    scrollMargin: virtualParentRef.current?.offsetTop ?? 0,
+    scrollMargin: virtualScrollMargin,
     overscan: 8,
     // Re-key when the underlying message identity changes (e.g. edit-and-
     // regenerate truncates the array), so cached row measurements don't
@@ -806,7 +246,7 @@ export default function ChatPage() {
 
   const virtualItems = virtualizer.getVirtualItems()
   const totalHeight = virtualizer.getTotalSize()
-  const scrollMargin = virtualizer.options.scrollMargin ?? 0
+  const scrollMargin = virtualScrollMargin
 
   return (
     <SimpleBar ref={simpleBarRef} onScroll={handleScroll}>
@@ -830,151 +270,11 @@ export default function ChatPage() {
                 <span className="whitespace-nowrap text-ellipsis overflow-hidden">{title}</span>
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <button className="h-8 px-3 rounded-[100px] inline-flex items-center gap-1 cursor-pointer outline outline-1 outline-offset-[-1px] outline-[var(--border-btn-main)] hover:bg-[var(--fill-tsp-white-light)] me-1.5">
-                      <ShareIcon color="var(--icon-secondary)" />
-                      <span className="text-[var(--text-secondary)] text-sm font-medium">Share</span>
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent>
-                    <div
-                      className="w-[400px] flex flex-col rounded-2xl bg-[var(--background-menu-white)] shadow-[0px_8px_32px_0px_var(--shadow-S),0px_0px_0px_1px_var(--border-light)]"
-                      style={{ maxWidth: 'calc(-16px + 100vw)' }}
-                    >
-                      <div className="flex flex-col pt-[12px] px-[16px] pb-[16px]">
-                        <div
-                          onClick={() => handleShareModeChange('private')}
-                          className={cn(
-                            'flex items-center gap-[10px] px-[8px] -mx-[8px] py-[8px] rounded-[8px] cursor-pointer hover:bg-[var(--fill-tsp-white-main)]',
-                            sharingLoading && 'pointer-events-none opacity-50',
-                          )}
-                        >
-                          <div
-                            className={cn(
-                              'w-[32px] h-[32px] rounded-[8px] flex items-center justify-center',
-                              shareMode === 'private'
-                                ? 'bg-[var(--Button-primary-black)]'
-                                : 'bg-[var(--fill-tsp-white-dark)]',
-                            )}
-                          >
-                            <Lock
-                              size={16}
-                              stroke={
-                                shareMode === 'private'
-                                  ? 'var(--text-onblack)'
-                                  : 'var(--icon-primary)'
-                              }
-                              strokeWidth={2}
-                            />
-                          </div>
-                          <div className="flex flex-col flex-1 min-w-0">
-                            <div className="text-sm font-medium text-[var(--text-primary)]">
-                              Private Only
-                            </div>
-                            <div className="text-[13px] text-[var(--text-tertiary)]">
-                              Only visible to you
-                            </div>
-                          </div>
-                          <Check
-                            size={20}
-                            className={cn(
-                              shareMode === 'private' ? 'ml-auto' : 'ml-auto invisible',
-                            )}
-                            color={
-                              shareMode === 'private'
-                                ? 'var(--icon-primary)'
-                                : 'var(--icon-tertiary)'
-                            }
-                          />
-                        </div>
-                        <div
-                          onClick={() => handleShareModeChange('public')}
-                          className={cn(
-                            'flex items-center gap-[10px] px-[8px] -mx-[8px] py-[8px] rounded-[8px] cursor-pointer hover:bg-[var(--fill-tsp-white-main)]',
-                            sharingLoading && 'pointer-events-none opacity-50',
-                          )}
-                        >
-                          <div
-                            className={cn(
-                              'w-[32px] h-[32px] rounded-[8px] flex items-center justify-center',
-                              shareMode === 'public'
-                                ? 'bg-[var(--Button-primary-black)]'
-                                : 'bg-[var(--fill-tsp-white-dark)]',
-                            )}
-                          >
-                            <Globe
-                              size={16}
-                              stroke={
-                                shareMode === 'public'
-                                  ? 'var(--text-onblack)'
-                                  : 'var(--icon-primary)'
-                              }
-                              strokeWidth={2}
-                            />
-                          </div>
-                          <div className="flex flex-col flex-1 min-w-0">
-                            <div className="text-sm font-medium text-[var(--text-primary)]">
-                              Public Access
-                            </div>
-                            <div className="text-[13px] text-[var(--text-tertiary)]">
-                              Anyone with the link can view
-                            </div>
-                          </div>
-                          <Check
-                            size={20}
-                            className={cn(
-                              shareMode === 'public' ? 'ml-auto' : 'ml-auto invisible',
-                            )}
-                            color={
-                              shareMode === 'public'
-                                ? 'var(--icon-primary)'
-                                : 'var(--icon-tertiary)'
-                            }
-                          />
-                        </div>
-                        <div className="border-t border-[var(--border-main)] mt-[4px]" />
-                        {shareMode === 'private' ? (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              void handleInstantShare()
-                            }}
-                            disabled={sharingLoading}
-                            className="inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors hover:opacity-90 bg-[var(--Button-primary-black)] text-[var(--text-onblack)] h-[36px] px-[12px] rounded-[10px] gap-[6px] text-sm w-full mt-[16px] disabled:opacity-50"
-                          >
-                            {sharingLoading ? (
-                              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                            ) : (
-                              <LinkIcon size={16} stroke="currentColor" strokeWidth={2} />
-                            )}
-                            {sharingLoading ? 'Sharing...' : 'Share Instantly'}
-                          </button>
-                        ) : (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              void handleCopyLink()
-                            }}
-                            className={cn(
-                              'inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors h-[36px] px-[12px] rounded-[10px] gap-[6px] text-sm w-full mt-[16px]',
-                              linkCopied
-                                ? 'bg-[var(--Button-primary-white)] text-[var(--text-primary)] hover:opacity-70 border border-[var(--border-btn-main)]'
-                                : 'bg-[var(--Button-primary-black)] text-[var(--text-onblack)] hover:opacity-90',
-                            )}
-                          >
-                            {linkCopied ? (
-                              <Check size={16} color="var(--text-primary)" />
-                            ) : (
-                              <LinkIcon size={16} stroke="currentColor" strokeWidth={2} />
-                            )}
-                            {linkCopied ? 'Link Copied' : 'Copy Link'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </PopoverContent>
-                </Popover>
+                <ShareMenu
+                  sessionId={sessionId}
+                  shareMode={shareMode}
+                  onShareModeChange={setShareMode}
+                />
                 <button
                   onClick={() => setSettingsOpen(true)}
                   title="Session settings"
@@ -1127,11 +427,13 @@ export default function ChatPage() {
         isShare={false}
         onJumpToRealTime={jumpToRealTime}
       />
-      <SessionSettingsDialog
-        open={settingsOpen}
-        onOpenChange={setSettingsOpen}
-        sessionId={sessionId}
-      />
+      {sessionId && (
+        <SessionSettingsDialog
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          sessionId={sessionId}
+        />
+      )}
     </SimpleBar>
   )
 }

@@ -233,6 +233,8 @@ function TreeLevel({
 }
 
 
+type TreeRowProps = Omit<TreeLevelProps, 'entries'> & { entry: FileListEntry }
+
 function TreeRow({
   entry,
   expanded,
@@ -243,7 +245,7 @@ function TreeRow({
   onToggle,
   onSelectFile,
   depth,
-}: TreeLevelProps & { entry: FileListEntry }) {
+}: TreeRowProps) {
   const isOpen = expanded.has(entry.path)
   const isLoading = loading.has(entry.path)
   const childEntries = children_[entry.path]

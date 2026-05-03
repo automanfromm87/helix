@@ -50,6 +50,12 @@ export default function SharePage() {
   const lastTool = useRef<ToolContent | undefined>()
   const lastEventId = useRef<string | undefined>()
   const jumpToEnd = useRef(false)
+  // Monotonic token incremented every time replay() is called. The async
+  // for-loop checks this against its captured value before each step and
+  // bails out if anything else (a second replay click, sessionId change,
+  // unmount) raced ahead — without this, an interrupted replay keeps
+  // pushing events into a now-stale message list.
+  const replayTokenRef = useRef(0)
   const countdownTimer = useRef<number | null>(null)
   const toolPanel = useRef<ToolPanelHandle>(null)
   const simpleBarRef = useRef<SimpleBarHandle>(null)
@@ -84,18 +90,41 @@ export default function SharePage() {
     (data: ToolEventData) => {
       const toolContent: ToolContent = { ...data }
       setMessages((prev) => {
-        const next = [...prev]
-        const existing = lastTool.current
-        if (existing && existing.tool_call_id === toolContent.tool_call_id) {
-          Object.assign(existing, toolContent)
-          return next.slice()
+        const directIdx = prev.findIndex(
+          (m) =>
+            m.type === 'tool' &&
+            (m.content as ToolContent).tool_call_id === toolContent.tool_call_id,
+        )
+        if (directIdx >= 0) {
+          const next = prev.slice()
+          next[directIdx] = { type: 'tool', content: toolContent }
+          return next
         }
-        const lastStep = [...next].reverse().find((m) => m.type === 'task')?.content as
-          | TaskContent
-          | undefined
-        if (lastStep && lastStep.status === 'running') lastStep.tools.push(toolContent)
-        else next.push({ type: 'tool', content: toolContent })
-        return next
+        for (let i = prev.length - 1; i >= 0; i--) {
+          const m = prev[i]
+          if (m.type !== 'task') continue
+          const task = m.content as TaskContent
+          const toolIdx = task.tools.findIndex(
+            (t) => t.tool_call_id === toolContent.tool_call_id,
+          )
+          if (toolIdx >= 0) {
+            const nextTools = task.tools.slice()
+            nextTools[toolIdx] = toolContent
+            const next = prev.slice()
+            next[i] = { type: 'task', content: { ...task, tools: nextTools } as TaskContent }
+            return next
+          }
+          if (task.status === 'running') {
+            const next = prev.slice()
+            next[i] = {
+              type: 'task',
+              content: { ...task, tools: [...task.tools, toolContent] } as TaskContent,
+            }
+            return next
+          }
+          break
+        }
+        return [...prev, { type: 'tool', content: toolContent }]
       })
       lastTool.current = toolContent
       if (toolContent.name !== 'message') {
@@ -108,18 +137,26 @@ export default function SharePage() {
 
   const handleStepEvent = useCallback((data: TaskEventData) => {
     setMessages((prev) => {
-      const next = [...prev]
-      const lastStep = [...next].reverse().find((m) => m.type === 'task')?.content as
-        | TaskContent
-        | undefined
       if (data.status === 'running') {
-        next.push({ type: 'task', content: { ...data, tools: [] } as TaskContent })
-      } else if (data.status === 'completed' && lastStep) {
-        lastStep.status = 'completed'
-      } else if (data.status === 'failed') {
+        return [
+          ...prev,
+          { type: 'task', content: { ...data, tools: [] } as TaskContent },
+        ]
+      }
+      if (data.status === 'completed') {
+        for (let i = prev.length - 1; i >= 0; i--) {
+          const m = prev[i]
+          if (m.type !== 'task') continue
+          const task = m.content as TaskContent
+          const next = prev.slice()
+          next[i] = { type: 'task', content: { ...task, status: 'completed' } as TaskContent }
+          return next
+        }
+      }
+      if (data.status === 'failed') {
         setIsLoading(false)
       }
-      return next
+      return prev
     })
   }, [])
 
@@ -129,7 +166,11 @@ export default function SharePage() {
       ...prev,
       {
         type: 'assistant',
-        content: { content: data.error, timestamp: data.timestamp } as MessageContent,
+        content: {
+          event_id: data.event_id,
+          content: `**⚠️ Error**\n\n${data.error}`,
+          timestamp: data.timestamp,
+        } as MessageContent,
       },
     ])
   }, [])
@@ -179,6 +220,7 @@ export default function SharePage() {
 
   const replay = useCallback(async () => {
     if (!sessionId) return
+    const token = ++replayTokenRef.current
     hideFilePanel()
     toolPanel.current?.hideToolPanel()
     setMessages([])
@@ -187,22 +229,34 @@ export default function SharePage() {
     lastTool.current = undefined
     lastNoMessageTool.current = undefined
     lastEventId.current = undefined
+    jumpToEnd.current = false
     setReplayCompleted(false)
     try {
       const session = await agentApi.getSharedSession(sessionId)
+      if (token !== replayTokenRef.current) return
       setRealTime(true)
       setIsLoading(true)
       for (const event of session.events) {
+        if (token !== replayTokenRef.current) return
         if (!jumpToEnd.current) await new Promise((r) => setTimeout(r, 300))
+        if (token !== replayTokenRef.current) return
         handleEvent(event)
       }
       setIsLoading(false)
       setReplayCompleted(true)
     } catch (e) {
+      if (token !== replayTokenRef.current) return
       console.error('Replay failed:', e)
       setIsLoading(false)
     }
   }, [sessionId, handleEvent, hideFilePanel])
+
+  // Cancel any in-flight replay loop on unmount or sessionId change.
+  useEffect(() => {
+    return () => {
+      replayTokenRef.current++
+    }
+  }, [sessionId])
 
   const startCountdown = useCallback(() => {
     if (countdownTimer.current) window.clearInterval(countdownTimer.current)

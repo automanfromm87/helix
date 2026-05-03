@@ -10,7 +10,6 @@ export type AgentSSEEvent = {
     | 'title'
     | 'wait'
     | 'plan'
-    | 'attachments'
   data:
     | ToolEventData
     | TaskEventData

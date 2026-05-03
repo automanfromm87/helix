@@ -5,11 +5,9 @@ import {
   clearAuthToken,
   clearStoredTokens,
   getCurrentUser,
-  getStoredRefreshToken,
   getStoredToken,
   login as apiLogin,
   logout as apiLogout,
-  refreshToken as apiRefreshToken,
   register as apiRegister,
   setAuthToken,
   storeRefreshToken,
@@ -35,9 +33,19 @@ interface AuthStore {
   register: (data: RegisterRequest) => Promise<RegisterResponse>
   logout: (silent?: boolean) => Promise<void>
   clearAuth: () => void
-  refreshAuthToken: () => Promise<boolean>
   hasRole: (role: string) => boolean
   clearError: () => void
+}
+
+/** Best-effort message extractor for axios / ApiError / Error / unknown. */
+function errorMessage(err: unknown): string | undefined {
+  if (!err) return undefined
+  if (err instanceof Error) return err.message
+  if (typeof err === 'object' && 'message' in err) {
+    const m = (err as { message?: unknown }).message
+    if (typeof m === 'string') return m
+  }
+  return undefined
 }
 
 const ANON_USER: User = {
@@ -77,9 +85,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({ isLoading: true, authError: null })
       const user = await getCurrentUser()
       set({ currentUser: user, isAuthenticated: true })
-    } catch (error: any) {
+    } catch (error) {
       get().clearAuth()
-      set({ authError: error?.message || 'Failed to load user information' })
+      set({ authError: errorMessage(error) || 'Failed to load user information' })
     } finally {
       set({ isLoading: false })
     }
@@ -94,8 +102,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       setAuthToken(response.access_token)
       set({ currentUser: response.user, isAuthenticated: true })
       return response
-    } catch (error: any) {
-      set({ authError: error?.message || 'Login failed' })
+    } catch (error) {
+      set({ authError: errorMessage(error) || 'Login failed' })
       throw error
     } finally {
       set({ isLoading: false })
@@ -111,8 +119,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       setAuthToken(response.access_token)
       set({ currentUser: response.user, isAuthenticated: true })
       return response
-    } catch (error: any) {
-      set({ authError: error?.message || 'Registration failed' })
+    } catch (error) {
+      set({ authError: errorMessage(error) || 'Registration failed' })
       throw error
     } finally {
       set({ isLoading: false })
@@ -137,23 +145,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     clearAuthToken()
     clearStoredTokens()
     set({ currentUser: null, isAuthenticated: false, authError: null })
-  },
-
-  refreshAuthToken: async () => {
-    const refreshToken = getStoredRefreshToken()
-    if (!refreshToken) {
-      get().clearAuth()
-      return false
-    }
-    try {
-      const response = await apiRefreshToken({ refresh_token: refreshToken })
-      storeToken(response.access_token)
-      setAuthToken(response.access_token)
-      return true
-    } catch (e) {
-      get().clearAuth()
-      return false
-    }
   },
 
   hasRole: (role) => get().currentUser?.role === role,
