@@ -95,7 +95,13 @@ class Tool:
         }
 
     async def ainvoke(self, args: Dict[str, Any]) -> ToolResult:
-        result = await self._fn(**(args or {}))
+        # Defence in depth: `validate_tool_input` upstream already rejects
+        # non-dict args, but if a future caller skips that gate, a non-dict
+        # `args` would TypeError on `**args`. Coerce here to a kwargs-safe
+        # value so the worst case is "tool runs with defaults" rather than
+        # "agent loop crashes mid-flight".
+        kwargs = args if isinstance(args, dict) else {}
+        result = await self._fn(**kwargs)
         if isinstance(result, ToolResult):
             return result
         # Be permissive: wrap raw values so the loop can always serialize.

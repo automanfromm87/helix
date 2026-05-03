@@ -503,8 +503,10 @@ async def shell_stream_websocket(
                             await websocket.send_text(data)
                 except websockets.exceptions.ConnectionClosed:
                     return
-                except Exception as e:
-                    logger.warning(f"shell downstream forward error: {e}")
+                except Exception:
+                    # exc_info=True so the traceback (and exception type) is in
+                    # the log even when str(e) returns "" (RuntimeError() etc).
+                    logger.warning("shell downstream forward error", exc_info=True)
 
             t_up = asyncio.create_task(upstream(), name="shell.upstream")
             t_dn = asyncio.create_task(downstream(), name="shell.downstream")
@@ -513,14 +515,14 @@ async def shell_stream_websocket(
             )
             for t in pending:
                 t.cancel()
-    except ConnectionError as exc:
-        logger.error(f"shell-stream sandbox connect failed: {exc}")
+    except ConnectionError:
+        logger.error("shell-stream sandbox connect failed", exc_info=True)
         try:
             await websocket.close(code=1011, reason="sandbox connection failed")
         except Exception:
             pass
-    except Exception as exc:
-        logger.error(f"shell-stream proxy crashed: {exc}")
+    except Exception:
+        logger.error("shell-stream proxy crashed", exc_info=True)
         try:
             await websocket.close(code=1011, reason="proxy error")
         except Exception:

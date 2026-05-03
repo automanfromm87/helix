@@ -136,7 +136,12 @@ class ExecutionAgent(BaseAgent):
                 # WAIT terminator, same as before.
                 if isinstance(event, ToolEvent) and event.function_name == ASK_USER_TOOL:
                     if event.status == ToolStatus.CALLING:
-                        yield MessageEvent(message=event.function_args.get("text", ""))
+                        # `function_args` is typed Dict[str, Any] but a smaller
+                        # model can mid-stream emit a partial tool_use whose
+                        # input arrived as None / empty / non-dict. Coerce so
+                        # `.get(...)` is always safe.
+                        args = event.function_args if isinstance(event.function_args, dict) else {}
+                        yield MessageEvent(message=args.get("text", ""))
                     elif event.status == ToolStatus.CALLED:
                         yield WaitEvent()
                         return

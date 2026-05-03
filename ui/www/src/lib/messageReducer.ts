@@ -33,8 +33,14 @@ const isPlaceholderEventId = (id?: string): boolean => !id || /^[0-]+$/.test(id)
  *    extra attachments row right after.
  */
 export function reduceMessage(prev: Message[], data: MessageEventData): Message[] {
+  // Coerce role: a less-careful backend (or a future system-role event)
+  // could send something outside the user|assistant union. Falling back
+  // to 'assistant' keeps the bubble visible instead of creating a
+  // phantom row whose type is technically invalid.
+  const role: 'user' | 'assistant' =
+    data.role === 'user' || data.role === 'assistant' ? data.role : 'assistant'
   const matchByMessageId = (m: Message): boolean => {
-    if (m.type !== data.role) return false
+    if (m.type !== role) return false
     if (m.type !== 'user' && m.type !== 'assistant') return false
     return data.message_id != null && m.content.message_id === data.message_id
   }
@@ -42,29 +48,32 @@ export function reduceMessage(prev: Message[], data: MessageEventData): Message[
     const idx = prev.findIndex(matchByMessageId)
     if (idx >= 0) {
       const next = prev.slice()
-      next[idx] = { type: data.role, content: { ...data } satisfies MessageContent }
+      next[idx] = { type: role, content: { ...data } satisfies MessageContent }
       return next
     }
   }
 
   if (!isPlaceholderEventId(data.event_id)) {
     const idx = prev.findIndex((m) => {
-      if (m.type !== data.role) return false
+      if (m.type !== role) return false
       if (m.type !== 'user' && m.type !== 'assistant') return false
       return m.content.event_id === data.event_id
     })
     if (idx >= 0) {
       const next = prev.slice()
-      next[idx] = { type: data.role, content: { ...data } satisfies MessageContent }
+      next[idx] = { type: role, content: { ...data } satisfies MessageContent }
       return next
     }
   }
 
   const next: Message[] = [
     ...prev,
-    { type: data.role, content: { ...data } satisfies MessageContent },
+    { type: role, content: { ...data } satisfies MessageContent },
   ]
-  if (data.attachments && data.attachments.length > 0) {
+  // Type says `FileInfo[] | null | undefined`, but a less-careful backend
+  // serializer could send a string or object. Array.isArray is the only
+  // honest check.
+  if (Array.isArray(data.attachments) && data.attachments.length > 0) {
     next.push({ type: 'attachments', content: { ...data } as AttachmentsContent })
   }
   return next

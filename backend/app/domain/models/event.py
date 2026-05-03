@@ -71,12 +71,19 @@ class McpToolContent(BaseModel):
     result: Any
 
 
+class SkillToolContent(BaseModel):
+    """Loaded skill body — markdown, rendered as-is in the side panel."""
+    name: str
+    body: str
+
+
 ToolContent = Union[
     BrowserToolContent,
     SearchToolContent,
     ShellToolContent,
     FileToolContent,
     McpToolContent,
+    SkillToolContent,
 ]
 
 

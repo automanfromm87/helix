@@ -16,6 +16,7 @@ from app.domain.models.event import (
     ShellToolContent,
     SearchToolContent,
     BrowserToolContent,
+    SkillToolContent,
     ToolStatus,
     AgentEvent,
     McpToolContent,
@@ -314,22 +315,63 @@ class AgentTaskRunner(TaskRunner):
                 elif event.tool_name == "search":
                     search_results: ToolResult[SearchResults] = event.function_result
                     logger.debug(f"Search tool results: {search_results}")
-                    event.tool_content = SearchToolContent(results=search_results.data.results)
+                    # Defend against the same pattern as shell/file: data may be
+                    # None on a failed search (rate limit, upstream timeout) and
+                    # `.data.results` would AttributeError.
+                    if search_results and search_results.success and search_results.data:
+                        event.tool_content = SearchToolContent(
+                            results=search_results.data.results,
+                        )
+                    else:
+                        event.tool_content = SearchToolContent(results=[])
                 elif event.tool_name == "shell":
                     if "id" in event.function_args:
                         shell_result = await self._sandbox.view_shell(event.function_args["id"], console=True)
-                        event.tool_content = ShellToolContent(console=shell_result.data.get("console", []))
+                        # `data` is Optional on ToolResult — when the sandbox call
+                        # fails (session expired, bad id) it comes back as None and
+                        # `.data.get(...)` would AttributeError. Surface a clear
+                        # placeholder instead so the panel still renders.
+                        if shell_result and shell_result.success and shell_result.data:
+                            event.tool_content = ShellToolContent(
+                                console=shell_result.data.get("console", []),
+                            )
+                        else:
+                            msg = (shell_result.message if shell_result else None) or "no output"
+                            event.tool_content = ShellToolContent(console=f"(shell unavailable: {msg})")
                     else:
                         event.tool_content = ShellToolContent(console="(No Console)")
                 elif event.tool_name == "file":
                     if "file" in event.function_args:
                         file_path = event.function_args["file"]
                         file_read_result = await self._sandbox.file_read(file_path)
-                        file_content: str = file_read_result.data.get("content", "")
-                        event.tool_content = FileToolContent(content=file_content)
-                        await self._sync_file_to_storage(file_path)
+                        if file_read_result and file_read_result.success and file_read_result.data:
+                            file_content: str = file_read_result.data.get("content", "")
+                            event.tool_content = FileToolContent(content=file_content)
+                            await self._sync_file_to_storage(file_path)
+                        else:
+                            msg = (file_read_result.message if file_read_result else None) or "read failed"
+                            event.tool_content = FileToolContent(content=f"(file unavailable: {msg})")
                     else:
                         event.tool_content = FileToolContent(content="(No Content)")
+                elif event.tool_name == "skill":
+                    # `load_skill` returns the skill body as a markdown string in
+                    # ToolResult.data. Defend against the all-too-common shapes
+                    # smaller models produce: missing data, non-string body,
+                    # missing args["name"]. Surface what we have either way.
+                    skill_name = ""
+                    args = event.function_args or {}
+                    if isinstance(args, dict):
+                        raw_name = args.get("name")
+                        skill_name = raw_name if isinstance(raw_name, str) else ""
+                    body = ""
+                    fr = event.function_result
+                    if fr and fr.success and fr.data is not None:
+                        body = fr.data if isinstance(fr.data, str) else str(fr.data)
+                    elif fr and fr.message:
+                        body = f"_(skill load failed: {fr.message})_"
+                    else:
+                        body = "_(skill body unavailable)_"
+                    event.tool_content = SkillToolContent(name=skill_name, body=body)
                 elif event.tool_name == "mcp":
                     logger.debug(f"Processing MCP tool event: function_result={event.function_result}")
                     if event.function_result:
