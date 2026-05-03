@@ -147,12 +147,18 @@ export default function ChatPage() {
     const onReply = (e: Event) => {
       const text = (e as CustomEvent<string>).detail
       if (!text) return
+      // Clear page-local input state too — the user might have typed
+      // something they were about to send when they clicked an option.
+      setInputMessage('')
+      setAttachments([])
+      setSelectedContexts([])
       setAwaitingReply(false)
-      void chat(text, [])
+      setFollow(true)
+      chat(text, [])
     }
     window.addEventListener('helix:reply-with-option', onReply)
     return () => window.removeEventListener('helix:reply-with-option', onReply)
-  }, [chat])
+  }, [chat, setAwaitingReply])
 
   const handleScroll = () => {
     setFollow(simpleBarRef.current?.isScrolledToBottom() ?? false)
@@ -407,8 +413,13 @@ export default function ChatPage() {
               onSubmit={() => {
                 const ctx = selectedContexts.map(inspectorContextBlock).join('\n\n')
                 const merged = ctx ? `${ctx}\n\n${inputMessage}`.trim() : inputMessage
+                const files = attachments
+                setInputMessage('')
+                setAttachments([])
+                setSelectedContexts([])
                 setAwaitingReply(false)
-                void chat(merged, attachments)
+                setFollow(true)
+                chat(merged, files)
               }}
               onStop={handleStop}
               placeholder={
