@@ -718,17 +718,25 @@ class DockerSandbox(Sandbox):
         crashed previous run. No-op when not running in Docker mode (i.e.
         SANDBOX_ADDRESS is set), because no containers will carry the label.
 
-        Containers younger than _REAP_GRACE_SECONDS are skipped — this
-        protects against a dev-mode race where uvicorn `--reload` restarts
-        the backend while a sandbox was just spawned: the new process's
-        active-sandbox list may briefly miss the freshly-saved row, and
-        without a grace period the reaper would kill a healthy in-flight
-        sandbox mid-task (caller would see `ConnectError: All connection
-        attempts failed`).
+        Containers younger than _REAP_GRACE_SECONDS are skipped. The grace
+        was originally 90s (just long enough for a dev-mode `--reload`
+        restart not to murder a freshly-spawned sandbox before its row
+        was saved), but that proved far too short in practice: deleting
+        a project cascade-removes the session row while the sandbox
+        container takes its time to destroy async, and a longer-running
+        chat (still actively driving the sandbox) whose project row
+        gets deleted — accidentally or otherwise — would have its
+        sandbox reaped 90s later, mid-task. Symptom seen: agent tools
+        cascading to `success=False` with `ConnectError: All connection
+        attempts failed` followed by `Task ended without
+        submit_task_result`. 1 hour is comfortably longer than any
+        realistic single-task duration; orphans from genuine deletes
+        still get cleaned up, just on the next-hour cycle instead of
+        the next-90-second cycle.
         """
         from datetime import datetime, timezone
 
-        _REAP_GRACE_SECONDS = 90
+        _REAP_GRACE_SECONDS = 3600  # 1 hour — see docstring
 
         try:
             docker_client = docker.from_env()
