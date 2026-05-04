@@ -7,7 +7,6 @@ import ProjectRow from './ProjectRow'
 import SkillsSection from './SkillsSection'
 import { useLeftPanel } from '@/hooks/useLeftPanel'
 import { useProjectsQuery, queryKeys } from '@/hooks/queries'
-import { createProject } from '@/api/projects'
 import { mergeSessions } from '@/api/agent'
 import type { ProjectItem } from '@/types/response'
 import { showErrorToast, showSuccessToast } from '@/utils/toast'
@@ -53,34 +52,13 @@ export default function LeftPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navigate])
 
-  const handleNewProject = async () => {
-    try {
-      const created = await createProject()
-      // Patch the cache so the row appears immediately, then navigate.
-      // A background refetch runs anyway thanks to the cache TTL, so any
-      // server-side fields we omit here will be filled in shortly.
-      queryClient.setQueryData<typeof projectsQuery.data>(queryKeys.projects, (cur) => {
-        if (!cur) return cur
-        const newRow: ProjectItem = {
-          project_id: created.project_id,
-          name: created.name,
-          system_prompt: created.system_prompt ?? null,
-          session_id: created.session_id,
-          title: null,
-          latest_message: null,
-          latest_message_at: null,
-          status: null,
-          unread_message_count: 0,
-          is_shared: false,
-        }
-        return { ...cur, projects: [...cur.projects, newRow] }
-      })
-      void queryClient.invalidateQueries({ queryKey: queryKeys.projects })
-      navigate(`/chat/${created.session_id}`)
-    } catch (e) {
-      console.error('Failed to create project:', e)
-      showErrorToast('Failed to create project')
-    }
+  const handleNewProject = () => {
+    // Send the user back to the home page input box. Project + session
+    // creation defers to the first prompt — HomePage.handleSubmit is
+    // what wires both up. Eagerly creating an empty project here used
+    // to leave behind orphan rows whenever the user navigated away
+    // without sending a message.
+    navigate('/')
   }
 
   const handleProjectDeleted = (projectId: string) =>

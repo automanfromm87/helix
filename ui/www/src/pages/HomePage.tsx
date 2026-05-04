@@ -15,6 +15,15 @@ import { usePendingMessage } from '@/hooks/usePendingMessage'
 import { showErrorToast } from '@/utils/toast'
 import type { FileInfo } from '@/api/file'
 
+const SUGGESTIONS = [
+  'Build a Twitter-like microblog',
+  'Build an Instagram-style photo feed',
+  'Build a Hacker News reader',
+  'Build a habit tracker',
+  'Build a flashcard study app',
+  'Build a personal blog with markdown',
+]
+
 export default function HomePage() {
   const navigate = useNavigate()
   const { currentUser } = useAuth()
@@ -51,12 +60,25 @@ export default function HomePage() {
   }
 
   const handleSubmit = async () => {
-    if (!message.trim() || isSubmitting) return
+    if (!message.trim()) {
+      console.warn('[HomePage] submit ignored — empty message')
+      return
+    }
+    if (isSubmitting) {
+      console.warn('[HomePage] submit ignored — already submitting')
+      return
+    }
     setIsSubmitting(true)
     try {
       // 1:1 model: each new chat is a fresh project that ships with its own
       // session. The first user message becomes the project's first turn.
       const project = await createProject()
+      if (!project?.session_id) {
+        // Defensive: a backend response with no session_id would leave us
+        // navigating to /chat/undefined. Treat as an error and let the
+        // user retry rather than landing on a broken page.
+        throw new Error('Backend returned project without a session_id')
+      }
       const files = attachments.map((file) => ({
         file_id: file.file_id,
         filename: file.filename,
@@ -73,9 +95,18 @@ export default function HomePage() {
         files,
       })
       navigate(`/chat/${project.session_id}`)
+      // We DON'T reset isSubmitting on success — the component is about
+      // to unmount via the navigation. Resetting now would race with
+      // teardown. If navigation somehow fails to unmount us (router
+      // hijack, future SPA architecture), the next mount of HomePage
+      // gets a fresh state object anyway.
     } catch (e) {
-      console.error('Failed to create project:', e)
-      showErrorToast('Failed to create project, please try again later')
+      console.error('[HomePage] handleSubmit failed:', e)
+      showErrorToast(
+        e instanceof Error
+          ? `Failed to create project: ${e.message}`
+          : 'Failed to create project, please try again later',
+      )
       setIsSubmitting(false)
     }
   }
@@ -170,6 +201,20 @@ export default function HomePage() {
                 onSubmit={handleSubmit}
               />
             </div>
+            {!message.trim() && (
+              <div className="flex flex-wrap gap-2 px-4 pt-3">
+                {SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setMessage(s)}
+                    className="px-3 py-1.5 text-xs rounded-full outline outline-1 -outline-offset-1 outline-[var(--border-btn-main)] text-[var(--text-secondary)] hover:bg-[var(--fill-tsp-white-light)] hover:text-[var(--text-primary)] transition-colors"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

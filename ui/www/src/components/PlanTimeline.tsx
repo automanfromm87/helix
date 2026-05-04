@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { forwardRef, useEffect, useRef } from 'react'
 import { Check, GitCommit, Loader2, X } from 'lucide-react'
 
 import type { PlanEventData } from '@/types/event'
@@ -90,12 +90,16 @@ interface NodeProps {
   onClick: () => void
 }
 
-const PlanNode = ({
+// Wrapped in forwardRef because React 18 treats `ref` as a special prop
+// — passing it as a regular function-component prop (the React 19
+// pattern) emits "Function components cannot be given refs" + the
+// `ref` value silently arrives as undefined, breaking the parent's
+// scrollIntoView on the active node.
+const PlanNode = forwardRef<HTMLButtonElement, NodeProps>(({
   plan,
   isActive,
   onClick,
-  ref,
-}: NodeProps & { ref?: React.Ref<HTMLButtonElement> }) => {
+}, ref) => {
   const StatusIcon =
     plan.status === 'completed' ? Check :
     plan.status === 'failed' ? X :
@@ -152,4 +156,5 @@ const PlanNode = ({
       </span>
     </button>
   )
-}
+})
+PlanNode.displayName = 'PlanNode'

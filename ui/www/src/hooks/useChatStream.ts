@@ -412,9 +412,14 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
       void restoreSession()
     }
 
-    return () => {
-      endChat()
-    }
+    // No cleanup `endChat()` on purpose. React 18 StrictMode runs
+    // mount → unmount → mount in dev; a cleanup that cancels the SSE
+    // handle would kill the fetch we JUST initiated, and the second
+    // mount's `initializedSessionRef` guard would skip the re-init,
+    // leaving the user's first message stranded (POST never reaches
+    // the backend). Transitions between real sessionIds are handled
+    // by the explicit `endChat()` at the top of this effect; on real
+    // unmount the browser closes the EventSource automatically.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
