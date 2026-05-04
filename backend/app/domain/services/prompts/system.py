@@ -70,6 +70,7 @@ You excel at the following tasks:
 - Must save code to files before execution; direct code input to interpreter commands is forbidden
 - Write Python code for complex mathematical calculations and analysis
 - Use search tools to find solutions when encountering unfamiliar problems
+- For greenfield web/API projects, call `helix_scaffold` (action="init") FIRST, before any `file_write`. The scaffolder emits byte-stable templates (Vite + React 19 + TS strict + Tailwind v4 / uv + FastAPI + SQLAlchemy 2 async) and auto-commits, giving every later edit a clean diff base. Use `helix_scaffold` actions page / endpoint / migration to add routes, handlers, and migrations on top — these update `.helix/manifest.json` and keep the project shape consistent across turns.
 </coding_rules>
 
 <writing_rules>

@@ -1,18 +1,38 @@
 # Incremental patch on top of the existing helix-sandbox image. The
 # upstream chromium PPA is currently flaky, so a from-scratch build
 # fails at the chromium apt step — this skips that by FROM'ing the
-# already-built image and only layering on the new bits (pnpm + the
-# helix-dev-runner + the updated supervisord.conf).
+# already-built image and only layering on the new bits.
+#
+# Build context: repo root (so we can COPY helixcli/). Invoke as:
+#   docker build -f sandbox/Dockerfile.patch -t helix-sandbox:latest .
 FROM helix-sandbox:latest
 
 # Install pnpm — used by helix-dev-runner.sh to bring up Vite dev
 # servers. Global install so it lives outside any per-project node_modules.
 RUN npm install -g pnpm@9 && pnpm config set registry https://registry.npmmirror.com
 
+# git — required by helixcli (every generator auto-commits) and broadly
+# expected in any sandbox the agent might run shell commands in.
+RUN apt-get update && apt-get install -y --no-install-recommends git && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    git config --system user.email "agent@helix.local" && \
+    git config --system user.name "Helix Agent"
+
 # Drop in the runner script as a real binary in PATH.
-COPY helix-dev-runner.sh /usr/local/bin/helix-dev-runner.sh
+COPY sandbox/helix-dev-runner.sh /usr/local/bin/helix-dev-runner.sh
 RUN chmod +x /usr/local/bin/helix-dev-runner.sh
 
 # Updated supervisord.conf adds [program:dev_server]. CMD points at
 # /app/supervisord.conf (see base image), so overwrite there.
-COPY supervisord.conf /app/supervisord.conf
+COPY sandbox/supervisord.conf /app/supervisord.conf
+
+# Install helixcli — deterministic project scaffolder exposed to the
+# agent as the `helix_scaffold` tool. Installed into a world-readable
+# venv at /opt/helixcli-venv so any user in the container resolves it
+# via the /usr/local/bin/helixcli symlink.
+COPY helixcli /tmp/helixcli
+RUN uv venv --clear --python python3.10 /opt/helixcli-venv && \
+    uv pip install --python /opt/helixcli-venv/bin/python /tmp/helixcli && \
+    ln -sf /opt/helixcli-venv/bin/helixcli /usr/local/bin/helixcli && \
+    chmod -R a+rX /opt/helixcli-venv && \
+    rm -rf /tmp/helixcli

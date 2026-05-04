@@ -77,6 +77,19 @@ class SkillToolContent(BaseModel):
     body: str
 
 
+class ScaffoldToolContent(BaseModel):
+    """`helix_scaffold` summary — what the CLI created and the manifest delta.
+
+    `success` distinguishes a clean generator run from a refused/failed one
+    so the FE can colour-code the panel without re-deriving from `created`.
+    """
+    action: str
+    success: bool
+    created: List[str] = []
+    summary: str = ""
+    payload: Optional[Dict[str, Any]] = None
+
+
 ToolContent = Union[
     BrowserToolContent,
     SearchToolContent,
@@ -84,6 +97,7 @@ ToolContent = Union[
     FileToolContent,
     McpToolContent,
     SkillToolContent,
+    ScaffoldToolContent,
 ]
 
 

@@ -17,6 +17,7 @@ from app.domain.models.event import (
     SearchToolContent,
     BrowserToolContent,
     SkillToolContent,
+    ScaffoldToolContent,
     ToolContent,
     ToolStatus,
     AgentEvent,
@@ -43,6 +44,38 @@ from app.domain.models.tool_result import ToolResult, TOOL_RESULT_SANDBOX_UNAVAI
 from app.domain.models.search import SearchResults
 
 logger = logging.getLogger(__name__)
+
+
+def _scaffold_summary(action: str, payload: Dict[str, Any]) -> str:
+    """One-line description of what `helixcli <action>` did, derived from
+    the CLI's stdout JSON. Kept short so it fits the side-panel header
+    next to the file list."""
+    if action == "init":
+        manifest = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else {}
+        stack = manifest.get("stack") or {}
+        parts = []
+        if stack.get("frontend"):
+            parts.append(str(stack["frontend"]))
+        if stack.get("backend"):
+            parts.append(str(stack["backend"]))
+        db = stack.get("database")
+        if db:
+            parts.append(f"db={db}")
+        return f"init → {' / '.join(parts)}" if parts else "init"
+    if action == "page":
+        name = payload.get("name") or "?"
+        path = payload.get("route_path") or "?"
+        wired = "wired" if payload.get("route_wired") else "not wired"
+        return f"page {name} → {path} ({wired})"
+    if action == "endpoint":
+        method = payload.get("method") or "?"
+        path = payload.get("path") or "?"
+        return f"endpoint {method} {path}"
+    if action == "migration":
+        name = payload.get("name") or "?"
+        return f"migration {name}"
+    return action
+
 
 class AgentTaskRunner(TaskRunner):
     """Agent task that can be cancelled"""
@@ -408,6 +441,41 @@ class AgentTaskRunner(TaskRunner):
             return McpToolContent(result=payload)
         return McpToolContent(result=str(fr))
 
+    async def _render_scaffold(self, event: ToolEvent) -> Optional[ToolContent]:
+        # `helixcli` returns a JSON object describing what it created. We
+        # surface a compact summary in the side panel — the file list +
+        # the manifest delta hint (route added, endpoint added, etc.) —
+        # without trying to reformat into a tree. Failed runs still get
+        # rendered so the agent can see the exit reason.
+        args = event.function_args if isinstance(event.function_args, dict) else {}
+        action = str(args.get("action") or "?")
+        fr = event.function_result
+        success = bool(fr and getattr(fr, "success", False))
+        payload = getattr(fr, "data", None) if fr else None
+        if not isinstance(payload, dict):
+            payload = None
+
+        created: List[str] = []
+        if payload:
+            raw_created = payload.get("created")
+            if isinstance(raw_created, list):
+                created = [str(p) for p in raw_created if isinstance(p, str)]
+
+        if success and payload:
+            summary = _scaffold_summary(action, payload)
+        elif fr and fr.message:
+            summary = fr.message
+        else:
+            summary = f"helix_scaffold {action} produced no output"
+
+        return ScaffoldToolContent(
+            action=action,
+            success=success,
+            created=created,
+            summary=summary,
+            payload=payload,
+        )
+
     # Dispatch table: tool_name -> bound renderer. Class-level so the dict
     # is built once, not on every event. `_TOOL_RENDERERS` keys must match
     # the toolkit `name` attributes.
@@ -418,6 +486,7 @@ class AgentTaskRunner(TaskRunner):
         "file": _render_file,
         "skill": _render_skill,
         "mcp": _render_mcp,
+        "helix_scaffold": _render_scaffold,
     }
 
     async def run(self, task: Task) -> None:

@@ -11,7 +11,10 @@
 # Detection priority:
 #   1. .helix-runner            — explicit user override (single-line
 #                                  command exec'd as-is)
-#   2. package.json present     — Vite/Node: pnpm dev on port 5173
+#   2. package.json present     — Vite/Node: npm install + npm run dev on
+#                                  port 5173. npm because helixcli scaffolds
+#                                  npm workspaces; pnpm 9 doesn't recognise
+#                                  npm's `workspaces` field.
 #   3. pyproject.toml + fastapi  — uvicorn --reload on port 8000
 #
 # Behavior while project is empty: blocks in a polling loop instead of
@@ -44,36 +47,82 @@ if [ -f .helix-runner ]; then
   fi
 fi
 
-# 2. Vite / Node
-if [ -f package.json ]; then
-  # Wait for the agent to finish installing — DO NOT install ourselves.
-  # Earlier iterations auto-ran `pnpm install` here, which raced against
-  # the agent's own `npm install` / `npm create vite` install step and
-  # corrupted node_modules (the `vitest: not found` / dead-shell-session
-  # failure mode). Just poll until node_modules appears, then exec vite.
-  if [ ! -d node_modules ]; then
-    echo "[helix-dev-runner] waiting for node_modules — agent should run \`npm install\`"
-    while [ ! -d node_modules ]; do sleep 2; done
-    echo "[helix-dev-runner] node_modules present — proceeding to vite"
-  fi
-  PORT=${HELIX_DEV_PORT:-5173}
-  echo "[helix-dev-runner] starting vite on :$PORT"
-  exec pnpm dev -- --host 0.0.0.0 --port "$PORT"
+# Detection. helixcli scaffolds a two-app monorepo:
+#   apps/web/  — Vite + React (npm workspace at root)
+#   apps/api/  — uv + FastAPI
+# Single-app projects (legacy or `--frontend-only` / `--backend-only`)
+# keep their package.json / pyproject.toml at the project root.
+WEB_DIR=""
+if [ -f apps/web/package.json ]; then
+  WEB_DIR="apps/web"  # workspace mode — root package.json drives install
+elif [ -f package.json ]; then
+  WEB_DIR="."
+fi
+API_DIR=""
+if [ -f apps/api/pyproject.toml ] && grep -qE "fastapi|uvicorn" apps/api/pyproject.toml; then
+  API_DIR="apps/api"
+elif [ -f pyproject.toml ] && grep -qE "fastapi|uvicorn" pyproject.toml; then
+  API_DIR="."
 fi
 
-# 3. FastAPI
-if [ -f pyproject.toml ] && grep -qE "fastapi|uvicorn" pyproject.toml; then
-  # Same passive-wait pattern as the Node branch above — install is the
-  # agent's job, we just wait for `.venv` to appear before exec'ing.
-  if [ ! -d .venv ]; then
-    echo "[helix-dev-runner] waiting for .venv — agent should run \`uv sync\`"
-    while [ ! -d .venv ]; do sleep 2; done
-    echo "[helix-dev-runner] .venv present — proceeding to uvicorn"
+# Backend goes first, in the background, so the foreground process
+# (Vite, when present) is the one supervisord watches for restart.
+# When only the API exists, uvicorn runs in the foreground.
+start_api_bg() {
+  (
+    cd "$PROJECT_DIR/$API_DIR"
+    if [ ! -f .venv/pyvenv.cfg ]; then
+      echo "[helix-dev-runner] .venv missing in $API_DIR — running uv sync"
+      uv sync 2>&1 | tail -10 || exit 1
+    fi
+    PORT=${HELIX_API_PORT:-8000}
+    echo "[helix-dev-runner] starting uvicorn on :$PORT in $API_DIR"
+    exec uv run uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --reload
+  ) &
+}
+
+if [ -n "$WEB_DIR" ] && [ -n "$API_DIR" ]; then
+  start_api_bg
+fi
+
+# 2. Vite / Node (foreground when present)
+if [ -n "$WEB_DIR" ]; then
+  # helixcli init creates `node_modules/<workspace>` SYMLINKS at scaffold
+  # time (workspace structure), so `[ ! -d node_modules ]` is fooled into
+  # thinking deps are installed even on a fresh project. Use the
+  # presence of `package-lock.json` as the real marker — that file only
+  # exists after a real `npm install` has completed at the project root.
+  if [ ! -f package-lock.json ]; then
+    echo "[helix-dev-runner] package-lock.json missing — running npm install"
+    npm install --no-audit --no-fund --loglevel=error 2>&1 | tail -20 || {
+      echo "[helix-dev-runner] npm install failed; sleeping 10s before supervisord retry"
+      sleep 10
+      exit 1
+    }
+  fi
+  PORT=${HELIX_DEV_PORT:-5173}
+  if [ "$WEB_DIR" = "apps/web" ]; then
+    echo "[helix-dev-runner] starting vite via workspace apps/web on :$PORT"
+    exec npm run dev --workspace apps/web -- --host 0.0.0.0 --port "$PORT"
+  fi
+  echo "[helix-dev-runner] starting vite on :$PORT"
+  exec npm run dev -- --host 0.0.0.0 --port "$PORT"
+fi
+
+# 3. FastAPI only (no frontend)
+if [ -n "$API_DIR" ]; then
+  cd "$PROJECT_DIR/$API_DIR"
+  if [ ! -f .venv/pyvenv.cfg ]; then
+    echo "[helix-dev-runner] .venv missing in $API_DIR — running uv sync"
+    uv sync 2>&1 | tail -20 || {
+      echo "[helix-dev-runner] uv sync failed; sleeping 10s before supervisord retry"
+      sleep 10
+      exit 1
+    }
   fi
   PORT=${HELIX_DEV_PORT:-8000}
-  TARGET="app.main:app"
-  echo "[helix-dev-runner] starting uvicorn on :$PORT ($TARGET)"
-  exec uv run uvicorn "$TARGET" --host 0.0.0.0 --port "$PORT" --reload
+  echo "[helix-dev-runner] starting uvicorn on :$PORT in $API_DIR"
+  exec uv run uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --reload
 fi
 
 # Files appeared but neither stack matched — log + sleep so supervisord

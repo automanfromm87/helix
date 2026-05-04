@@ -47,6 +47,7 @@ from app.domain.services.tools.mcp import MCPToolkit
 from app.domain.services.tools.message import MessageToolkit
 from app.domain.services.tools.retrieve import RetrieveToolkit
 from app.domain.services.tools.search import SearchToolkit
+from app.domain.services.tools.scaffold import ScaffoldToolkit
 from app.domain.services.tools.shell import ShellToolkit
 from app.domain.repositories.skill_repository import SkillRepository
 from app.domain.services.tools.skill import SkillToolkit, render_skill_index
@@ -106,6 +107,7 @@ class PlanActFlow(BaseFlow):
             BrowserToolkit(browser),
             FileToolkit(sandbox),
             MessageToolkit(),
+            ScaffoldToolkit(sandbox),
             mcp_tool,
         ]
         if search_engine:

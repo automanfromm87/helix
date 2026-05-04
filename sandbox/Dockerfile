@@ -88,25 +88,37 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy project files (copy dependency files first to leverage cache)
-COPY pyproject.toml ./
+COPY sandbox/pyproject.toml ./
 
 # Install Python dependencies
 RUN uv sync --no-dev
 
-# Copy remaining project files
-COPY . .
+# Copy remaining sandbox files
+COPY sandbox/ ./
 
 # Ensure application files are writable by app user
 RUN chown -R ubuntu:ubuntu /app
 
 # Configure supervisor
-COPY supervisord.conf /etc/supervisor/conf.d/app.conf
+COPY sandbox/supervisord.conf /etc/supervisor/conf.d/app.conf
 
 # Helix-managed dev server runner. Owned by supervisord, not the agent —
 # this is the "service that's always running when project files exist"
 # guarantee. See sandbox/helix-dev-runner.sh for stack detection logic.
-COPY helix-dev-runner.sh /usr/local/bin/helix-dev-runner.sh
+COPY sandbox/helix-dev-runner.sh /usr/local/bin/helix-dev-runner.sh
 RUN chmod +x /usr/local/bin/helix-dev-runner.sh
+
+# Install helixcli — deterministic project scaffolder the agent calls via
+# the `helix_scaffold` tool. Installed into a world-readable venv at
+# /opt/helixcli-venv so both root and the ubuntu user can invoke it via
+# the /usr/local/bin/helixcli symlink. (uv tool install would land the
+# binary under /root/.local/bin which ubuntu can't read.)
+COPY helixcli /tmp/helixcli
+RUN uv venv --python python3.10 /opt/helixcli-venv && \
+    uv pip install --python /opt/helixcli-venv/bin/python /tmp/helixcli && \
+    ln -sf /opt/helixcli-venv/bin/helixcli /usr/local/bin/helixcli && \
+    chmod -R a+rX /opt/helixcli-venv && \
+    rm -rf /tmp/helixcli
 
 # Expose ports
 EXPOSE 8080 9222 5900 5901
