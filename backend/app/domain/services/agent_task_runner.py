@@ -24,6 +24,7 @@ from app.domain.models.event import (
 )
 from app.application.errors.exceptions import SandboxUnavailableError
 from app.domain.constants import SANDBOX_PROJECT_DIR
+from app.domain.models.plan import PlanStatus
 from app.domain.services.flows.plan_act import PlanActFlow
 from app.domain.external.sandbox import Sandbox
 from app.domain.external.browser import Browser
@@ -467,6 +468,37 @@ class AgentTaskRunner(TaskRunner):
             await self._maybe_update_project_shared_memory()
         except asyncio.CancelledError:
             logger.info(f"Agent {self._agent_id} task cancelled")
+            # asyncio.CancelledError tears down the flow generator mid-yield,
+            # so any in-flight task is left in RUNNING and the plan in
+            # EXECUTING. Clean those up so the session's last visible state
+            # in the DB matches what the user just did (cancelled the run),
+            # not "still executing forever".
+            try:
+                plan = await self._plan_repository.find_current_plan(
+                    self._session_id,
+                )
+                if plan is not None:
+                    cancelled_tasks = await self._plan_repository.reset_running_tasks(
+                        plan.id,
+                    )
+                    if cancelled_tasks:
+                        logger.info(
+                            "Cancelled %d running task(s) for plan %s on agent cancel",
+                            cancelled_tasks, plan.id,
+                        )
+                    if plan.status not in (
+                        PlanStatus.COMPLETED, PlanStatus.FAILED,
+                    ):
+                        await self._plan_repository.update_plan_status(
+                            plan.id, PlanStatus.FAILED,
+                            error="Cancelled by user",
+                        )
+            except Exception:
+                logger.exception(
+                    "Cancel cleanup failed for session %s; DB rows may be "
+                    "stale until next plan boot",
+                    self._session_id,
+                )
             await self._put_and_add_event(task, DoneEvent())
             await self._session_repository.update_status(self._session_id, SessionStatus.COMPLETED)
         except Exception as e:
