@@ -112,17 +112,22 @@ to `App.tsx` — if the styling lands, you're done. If not, the most
 common miss is forgetting the `@import` in `index.css` or skipping the
 plugin in `vite.config.ts`.
 
-**2d. Verify the dev server is up — DO NOT start it yourself**
+**2d. Install deps yourself, then verify the dev server is up — DO NOT start vite yourself**
 
 The sandbox runs Vite as a supervisord-managed service
-(`/usr/local/bin/helix-dev-runner.sh`). The moment a `package.json`
-appears in `/home/ubuntu/project`, supervisord installs deps if needed
-and starts `pnpm dev -- --host 0.0.0.0 --port 5173` — and keeps it
-running through crashes. Your job is to **verify** it's up after
-scaffolding, not to start it.
+(`/usr/local/bin/helix-dev-runner.sh`). It **passively waits** for
+`node_modules/` to appear, then exec's `pnpm dev -- --host 0.0.0.0
+--port 5173` — and keeps it running through crashes. **Install is
+your job:** run `npm install` (or `pnpm install`) yourself in a
+single shell command, ONCE, after writing `package.json`. The
+runner does NOT install for you (an earlier auto-install racing
+the agent's own install corrupted `node_modules` — typical
+symptom: `vitest: not found`, dead shell sessions, generic
+`success=False` cascades).
+
+After install completes, vite auto-starts within ~2s. Verify:
 
 ```bash
-# Allow up to 30s for pnpm install on a cold sandbox.
 for i in {1..15}; do
   curl -fsS http://localhost:5173/ -o /dev/null && { echo OK; break; }
   sleep 2

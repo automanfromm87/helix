@@ -78,19 +78,20 @@ in `app/main.py` (see §4) and delete the stub. Update `pyproject.toml`'s
 `[project.scripts]` if you want a CLI entry; otherwise the user runs
 `uv run fastapi dev app/main.py`.
 
-**2d. Verify uvicorn is up — DO NOT start it yourself**
+**2d. Run `uv sync` yourself, then verify uvicorn — DO NOT start uvicorn yourself**
 
 The sandbox runs uvicorn as a supervisord-managed service
-(`/usr/local/bin/helix-dev-runner.sh`). When a `pyproject.toml`
-mentioning `fastapi`/`uvicorn` appears in `/home/ubuntu/project`,
-supervisord runs `uv sync` if needed and starts
+(`/usr/local/bin/helix-dev-runner.sh`). It **passively waits** for
+`.venv/` to appear, then exec's
 `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload`.
 `--reload` keeps the running process in sync with your file edits.
+**`uv sync` is your job:** run it yourself, ONCE, after writing
+`pyproject.toml`. The runner does NOT sync deps for you (an
+earlier auto-sync racing the agent's own sync corrupted state).
 
-Your job is to **verify** uvicorn is reachable, not to start it.
+After `uv sync` completes, uvicorn auto-starts within ~2s. Verify:
 
 ```bash
-# Allow up to 30s for uv sync on a cold sandbox.
 for i in {1..15}; do
   curl -fsS http://localhost:8000/docs -o /dev/null && { echo OK; break; }
   sleep 2

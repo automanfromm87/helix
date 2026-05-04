@@ -46,16 +46,15 @@ fi
 
 # 2. Vite / Node
 if [ -f package.json ]; then
-  # node_modules cache may not exist on a fresh fork (we exclude it from
-  # fork copy to keep it lightweight) or after a clean checkout. pnpm's
-  # global store makes install fast — usually under 10 sec on cache hit.
+  # Wait for the agent to finish installing — DO NOT install ourselves.
+  # Earlier iterations auto-ran `pnpm install` here, which raced against
+  # the agent's own `npm install` / `npm create vite` install step and
+  # corrupted node_modules (the `vitest: not found` / dead-shell-session
+  # failure mode). Just poll until node_modules appears, then exec vite.
   if [ ! -d node_modules ]; then
-    echo "[helix-dev-runner] node_modules missing — running pnpm install"
-    pnpm install --prefer-offline --reporter=append-only 2>&1 | tail -20 || {
-      echo "[helix-dev-runner] pnpm install failed; sleeping 10s before supervisord retry"
-      sleep 10
-      exit 1
-    }
+    echo "[helix-dev-runner] waiting for node_modules — agent should run \`npm install\`"
+    while [ ! -d node_modules ]; do sleep 2; done
+    echo "[helix-dev-runner] node_modules present — proceeding to vite"
   fi
   PORT=${HELIX_DEV_PORT:-5173}
   echo "[helix-dev-runner] starting vite on :$PORT"
@@ -64,13 +63,12 @@ fi
 
 # 3. FastAPI
 if [ -f pyproject.toml ] && grep -qE "fastapi|uvicorn" pyproject.toml; then
+  # Same passive-wait pattern as the Node branch above — install is the
+  # agent's job, we just wait for `.venv` to appear before exec'ing.
   if [ ! -d .venv ]; then
-    echo "[helix-dev-runner] .venv missing — running uv sync"
-    uv sync 2>&1 | tail -20 || {
-      echo "[helix-dev-runner] uv sync failed; sleeping 10s before supervisord retry"
-      sleep 10
-      exit 1
-    }
+    echo "[helix-dev-runner] waiting for .venv — agent should run \`uv sync\`"
+    while [ ! -d .venv ]; do sleep 2; done
+    echo "[helix-dev-runner] .venv present — proceeding to uvicorn"
   fi
   PORT=${HELIX_DEV_PORT:-8000}
   TARGET="app.main:app"
