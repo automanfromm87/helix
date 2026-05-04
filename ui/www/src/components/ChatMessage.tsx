@@ -1,4 +1,4 @@
-import { useState, type ComponentType } from 'react'
+import { memo, useState, type ComponentType } from 'react'
 import { Bot, ChevronDown, Check, Pencil } from 'lucide-react'
 
 import { type Message, type ToolContent } from '@/types/message'
@@ -21,7 +21,7 @@ interface Props {
   onEditUserMessage?: (eventId: string, newMessage: string) => void
 }
 
-export default function ChatMessage({
+function ChatMessageInner({
   message,
   assistantIcon: AssistantIcon,
   assistantName,
@@ -264,3 +264,13 @@ export default function ChatMessage({
 
   return null
 }
+
+// `memo` is what makes streaming feel smooth — without it every partial
+// MessageEvent re-renders ALL visible message bubbles in the virtualised
+// list, not just the streaming one. The default shallow prop comparison
+// is enough because the parent reuses message objects across renders
+// (reduceMessage replaces in place; unchanged rows keep the same object
+// reference). Make sure callbacks passed in are useCallback-wrapped at
+// the call site or the memo is defeated.
+const ChatMessage = memo(ChatMessageInner)
+export default ChatMessage

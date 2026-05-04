@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, FileSearch, PanelLeft, Settings2 } from 'lucide-react'
@@ -172,10 +172,15 @@ export default function ChatPage() {
     })
   }
 
-  const handleToolClick = (tool: ToolContent) => {
-    setRealTime(false)
-    if (sessionId) toolPanel.current?.showToolPanel(tool, isLiveTool(tool))
-  }
+  // useCallback so the prop reference is stable across re-renders —
+  // ChatMessage is memoised and would re-render every partial otherwise.
+  const handleToolClick = useCallback(
+    (tool: ToolContent) => {
+      setRealTime(false)
+      if (sessionId) toolPanel.current?.showToolPanel(tool, isLiveTool(tool))
+    },
+    [sessionId, setRealTime, isLiveTool],
+  )
 
   const jumpToRealTime = () => {
     setRealTime(true)
