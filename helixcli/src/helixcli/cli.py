@@ -13,10 +13,13 @@ from typing import Optional
 
 import typer
 
+from helixcli.commands import component as component_cmd
 from helixcli.commands import endpoint as endpoint_cmd
+from helixcli.commands import hook as hook_cmd
 from helixcli.commands import init as init_cmd
 from helixcli.commands import install as install_cmd
 from helixcli.commands import migration as migration_cmd
+from helixcli.commands import model as model_cmd
 from helixcli.commands import page as page_cmd
 from helixcli.commands import up as up_cmd
 from helixcli.errors import HelixCliError
@@ -131,6 +134,59 @@ def migration_command(
     """Wrapper around `alembic revision --autogenerate` inside apps/api."""
     try:
         result = migration_cmd.run(project_root=Path.cwd(), name=name)
+    except HelixCliError as e:
+        _fail(e)
+    _emit(result)
+
+
+@app.command("component")
+def component_command(
+    name: str = typer.Argument(
+        ..., help="Component name in PascalCase, e.g. 'PostCard'.",
+    ),
+) -> None:
+    """Add a frontend React component (no router wiring).
+
+    For routed pages use `helixcli page`. This command is for
+    presentational components mounted by other components.
+    """
+    try:
+        result = component_cmd.run(project_root=Path.cwd(), name=name)
+    except HelixCliError as e:
+        _fail(e)
+    _emit(result)
+
+
+@app.command("hook")
+def hook_command(
+    name: str = typer.Argument(
+        ..., help="Hook noun in PascalCase (without leading 'use'), e.g. 'Posts'.",
+    ),
+) -> None:
+    """Add a custom React hook. The generator prepends `use` — pass
+    'Posts' to get `usePosts.ts`."""
+    try:
+        result = hook_cmd.run(project_root=Path.cwd(), name=name)
+    except HelixCliError as e:
+        _fail(e)
+    _emit(result)
+
+
+@app.command("model")
+def model_command(
+    name: str = typer.Argument(
+        ..., help="Model class name in PascalCase, e.g. 'User'.",
+    ),
+) -> None:
+    """Add a SQLAlchemy ORM model. File path is snake_case
+    (`user.py`); table name is plural snake_case (`users`).
+
+    The model is registered in `apps/api/app/models/__init__.py` so
+    Alembic's autogenerate sees it; run `helix_scaffold migration
+    init_<name>` afterwards to create the migration.
+    """
+    try:
+        result = model_cmd.run(project_root=Path.cwd(), name=name)
     except HelixCliError as e:
         _fail(e)
     _emit(result)

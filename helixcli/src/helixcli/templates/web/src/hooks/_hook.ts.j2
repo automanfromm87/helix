@@ -1,0 +1,14 @@
+import { useCallback, useState } from 'react'
+
+/**
+ * use{{ name }} — replace this body with the real hook logic.
+ *
+ * The scaffold returns a `{ value, set }` pair as a placeholder so the
+ * call sites compile; rewrite the return shape to match the data this
+ * hook actually owns.
+ */
+export function use{{ name }}<T = unknown>(initial: T) {
+  const [value, setValue] = useState<T>(initial)
+  const set = useCallback((next: T) => setValue(next), [])
+  return { value, set }
+}

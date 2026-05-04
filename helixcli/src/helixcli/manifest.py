@@ -7,7 +7,7 @@ workspace_summary, so keep the shape stable and forward-compatible
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -60,7 +60,7 @@ class Manifest(BaseModel):
     routes: list[RouteEntry] = Field(default_factory=list)
     endpoints: list[EndpointEntry] = Field(default_factory=list)
     models: list[ModelEntry] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     helixcli_version: str = __version__
 
     @classmethod

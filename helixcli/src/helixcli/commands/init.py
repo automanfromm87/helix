@@ -50,12 +50,16 @@ def run(
         if backend:
             created += _scaffold_backend(project_root, project_name=name, db=db)
 
-        # Cross-cutting: monorepo root files.
-        if frontend and backend:
+        # Cross-cutting: root files.
+        # If a frontend exists we always emit an npm workspace root —
+        # the helix sandbox dev-runner watches /home/ubuntu/project/ for
+        # `package.json`, so a frontend-only project without a root
+        # package.json leaves the runner stuck waiting forever. Workspace
+        # mode with a single `apps/web` entry is harmless.
+        if frontend:
             created += _scaffold_monorepo_root(project_root, project_name=name)
         else:
-            # Single-app: no workspace root needed; still drop README +
-            # .gitignore so subsequent commits make sense.
+            # Backend-only: no package.json at root; just README + .gitignore.
             created += _scaffold_root_minimal(project_root, project_name=name)
 
         manifest = Manifest(

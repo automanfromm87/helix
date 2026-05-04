@@ -1,3 +1,16 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-return */
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+// helix-inspector reaches into React fiber internals (`_debugSource`,
+// `__reactFiber$*`) which are untyped on purpose — typing them would
+// require shipping React's internals. The `no-unsafe-*` rules can't
+// see the contract and only produce false-positive errors that block
+// clean `npm run lint` runs. Don't remove these directives without
+// rewriting the inspector to avoid fiber introspection.
+//
 // Helix preview inspector — dev-only. Loaded conditionally from
 // main.tsx; the production build never imports it.
 //

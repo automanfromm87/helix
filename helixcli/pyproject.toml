@@ -3,7 +3,7 @@ name = "helixcli"
 version = "0.1.0"
 description = "Deterministic project scaffolder for the Helix sandbox."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "typer>=0.12",
     "jinja2>=3.1",
@@ -25,7 +25,7 @@ packages = ["src/helixcli"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
