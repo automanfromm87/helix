@@ -15,11 +15,16 @@
 #   HTTP_PROXY_ADDRESS=host:port  # Outbound HTTP proxy for LLM calls.
 #   MODEL_NAME=claude-sonnet-4-5  # Override model name.
 #
-# Example:
+# Example (local clone, env vars on the same line):
 #   LLM_API_KEY=sk-ant-xxx ./install.sh
-#   LLM_GATEWAY_URL=https://my-gateway.example.com \
-#     HTTP_PROXY_ADDRESS=host.docker.internal:8080 \
-#     LLM_API_KEY=any-string ./install.sh
+#
+# Example (curl pipe — note env vars must be on the `bash` side of the
+# pipe, NOT the `curl` side, otherwise they're scoped to curl only):
+#   curl -fsSL .../install.sh | LLM_API_KEY=sk-ant-xxx bash
+#
+# Or download first, then run with env vars:
+#   curl -fsSL .../install.sh -o install.sh && \
+#     LLM_API_KEY=sk-ant-xxx bash install.sh
 
 set -Eeuo pipefail
 
@@ -130,8 +135,12 @@ rm -f .env.bak
 
 # Sanity: warn if LLM_API_KEY is still empty (chat will 401).
 if ! grep -qE "^LLM_API_KEY=.+$" .env; then
-  warn "LLM_API_KEY is not set in .env — chat will fail with 401 until you fill it."
-  warn "Edit .env or re-run with: LLM_API_KEY=sk-ant-... ./install.sh"
+  warn "LLM_API_KEY is not set in .env — chat will fail until you fix it."
+  warn "Two ways to fix:"
+  warn "  1) Edit .env directly:  $(pwd)/.env  (set LLM_API_KEY=...)"
+  warn "  2) Re-run install with env vars on the right side of the pipe:"
+  warn "     curl ... | LLM_API_KEY=sk-... bash"
+  warn "After fixing, run: ./dev.sh restart backend"
 fi
 
 # ----------------------------------------------------------------------

@@ -52,7 +52,6 @@ services:
     depends_on:
       postgres:
         condition: service_started
-        required: true
     restart: unless-stopped
     networks:
       - helix-network
