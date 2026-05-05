@@ -122,6 +122,7 @@ class ExecutionAgent(BaseAgent):
         self._override_terminal_tools = {SUBMIT_TASK_RESULT_TOOL}
         try:
             submitted: Optional[dict] = None
+            saw_error = False
             async for event in self.execute(request):
                 # Submit-result is internal protocol; suppress its events.
                 if (
@@ -147,9 +148,18 @@ class ExecutionAgent(BaseAgent):
                         return
                     continue
 
+                if isinstance(event, ErrorEvent):
+                    saw_error = True
                 yield event
 
             if submitted is None:
+                # If the base loop already yielded an ErrorEvent (walltime,
+                # iteration cap, LLM transport failure, LoopGuard, etc.),
+                # the real cause is upstream — adding a generic "did not
+                # submit" error on top would overwrite `had_error` in the
+                # plan flow and hide the actual failure from the user.
+                if saw_error:
+                    return
                 # Implicit-completion fallback (mirrors speedjs's
                 # `Task_done_implicit`): if the loop ended cleanly with the
                 # model's last assistant turn being free text and no
@@ -203,6 +213,7 @@ class ExecutionAgent(BaseAgent):
         self._override_terminal_tools = {SUBMIT_SUMMARY_TOOL}
         try:
             submitted: Optional[dict] = None
+            saw_error = False
             async for event in self.execute(SUMMARIZE_PROMPT):
                 if (
                     isinstance(event, ToolEvent)
@@ -211,9 +222,15 @@ class ExecutionAgent(BaseAgent):
                     if event.status == ToolStatus.CALLED:
                         submitted = dict(event.function_args or {})
                     continue
+                if isinstance(event, ErrorEvent):
+                    saw_error = True
                 yield event
 
             if submitted is None:
+                # Real upstream error — don't override it with a generic
+                # "did not submit" message that hides the root cause.
+                if saw_error:
+                    return
                 yield ErrorEvent(error="Summarizer did not submit a summary")
                 return
 
