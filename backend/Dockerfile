@@ -1,33 +1,36 @@
+# syntax=docker/dockerfile:1.7
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install curl + git (git is used for plan-versioning: each completed plan
-# becomes a tagged commit on the project's host bind mount).
-RUN apt-get update && apt-get install -y curl git
+# Keep apt's package cache in a BuildKit cache mount.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean && \
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+        > /etc/apt/apt.conf.d/keep-cache
 
-# Install nodejs
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs
+# curl + git (plan-versioning auto-commits) + Node 22 in one apt update.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl git ca-certificates gnupg && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs
 
-# Install uv
-RUN pip install uv
+# uv (cached pip)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install uv
 
-# Configure uv to use Aliyun mirror
-ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
-
-# Install dependencies
+# Backend python deps (cached uv downloads stay warm across rebuilds)
 COPY pyproject.toml ./
-RUN uv sync --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-dev
 
-# Copy project files
+# Application source last — code edits don't bust the deps cache.
 COPY . .
 
-# Set environment variables
 ENV PYTHONPATH=/app
 
-# Expose port
 EXPOSE 8000
 
-# Start command
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

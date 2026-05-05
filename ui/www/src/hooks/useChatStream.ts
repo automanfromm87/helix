@@ -138,18 +138,30 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
     // task during replay stacks render pressure that has tripped React's
     // "Maximum update depth" guard on long sessions.
     if (replayingRef.current) return
-    setPlan((prev) => {
-      if (!prev || prev.plan_id !== data.plan_id) return prev
-      const idx = prev.tasks.findIndex((t) => t.task_id === data.task_id)
+    const mergeIntoPlan = (p: PlanEventData): PlanEventData => {
+      if (p.plan_id !== data.plan_id) return p
+      const idx = p.tasks.findIndex((t) => t.task_id === data.task_id)
       const merged: TaskEventData = {
-        ...(idx >= 0 ? prev.tasks[idx] : ({} as TaskEventData)),
+        ...(idx >= 0 ? p.tasks[idx] : ({} as TaskEventData)),
         ...data,
       }
       const tasks =
         idx >= 0
-          ? prev.tasks.map((t, i) => (i === idx ? merged : t))
-          : [...prev.tasks, merged].sort((a, b) => a.position - b.position)
-      return { ...prev, tasks }
+          ? p.tasks.map((t, i) => (i === idx ? merged : t))
+          : [...p.tasks, merged].sort((a, b) => a.position - b.position)
+      return { ...p, tasks }
+    }
+    setPlan((prev) => (prev ? mergeIntoPlan(prev) : prev))
+    // Also patch planHistory — ChatPage renders the active plan from
+    // `planHistory[viewedPlanIndex]` (with `plan` only as a fallback),
+    // so mirroring solely into `plan` left the top summary stuck at
+    // 0/N until the closing PlanEvent overwrote the snapshot.
+    setPlanHistory((prev) => {
+      const idx = prev.findIndex((p) => p.plan_id === data.plan_id)
+      if (idx < 0) return prev
+      const next = prev.slice()
+      next[idx] = mergeIntoPlan(prev[idx])
+      return next
     })
   }, [])
 
@@ -356,6 +368,41 @@ export function useChatStream({ sessionId, toolPanelRef, onSessionChanged }: Opt
         for (const event of session.events) handleEvent(event)
       } finally {
         replayingRef.current = false
+      }
+      // handleTaskEvent skips setPlan during replay (render-storm guard
+      // documented above). Without this fold, the plan panel would stay
+      // pinned at whatever the initial PlanEvent EXECUTING captured —
+      // typically all tasks PENDING — until the closing PlanEvent
+      // COMPLETED overwrote the snapshot. Apply the latest task status
+      // per task_id from the replayed events in a single setPlan call.
+      const latestTaskByPlan = new Map<string, Map<string, TaskEventData>>()
+      for (const event of session.events) {
+        if (event.event !== 'task') continue
+        const t = event.data as TaskEventData
+        let m = latestTaskByPlan.get(t.plan_id)
+        if (!m) {
+          m = new Map()
+          latestTaskByPlan.set(t.plan_id, m)
+        }
+        m.set(t.task_id, t)
+      }
+      if (latestTaskByPlan.size > 0) {
+        const foldStatuses = (p: PlanEventData): PlanEventData => {
+          const tasksForPlan = latestTaskByPlan.get(p.plan_id)
+          if (!tasksForPlan) return p
+          const tasks = p.tasks.map((t) => {
+            const latest = tasksForPlan.get(t.task_id)
+            return latest ? { ...t, ...latest } : t
+          })
+          return { ...p, tasks }
+        }
+        setPlan((prev) => (prev ? foldStatuses(prev) : prev))
+        // PlanPanel renders from planHistory[viewedPlanIndex] first, so
+        // applying the fold only to `plan` would leave the top summary
+        // stale until a fresh PlanEvent overwrites planHistory.
+        setPlanHistory((prev) =>
+          prev.map((p) => (latestTaskByPlan.has(p.plan_id) ? foldStatuses(p) : p))
+        )
       }
       setRealTime(true)
       // Surface the preview iframe by default — every session has one.

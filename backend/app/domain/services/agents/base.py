@@ -397,6 +397,12 @@ class BaseAgent(ABC):
         endgame_iter_threshold = max(self.max_iterations - 2, 1)
         endgame_walltime_threshold = self.max_walltime_seconds * 0.9
 
+        # Set when an iteration ends with text-only output but the agent has
+        # terminal tools — forces tool_choice on the *next* iteration so the
+        # model can't keep skipping submit_*. Reset every iteration after the
+        # endgame check consumes it.
+        force_terminal_next = False
+
         for iteration in range(self.max_iterations):
             if time.monotonic() > deadline:
                 logger.warning(
@@ -418,8 +424,10 @@ class BaseAgent(ABC):
                 and (
                     iteration >= endgame_iter_threshold
                     or elapsed >= endgame_walltime_threshold
+                    or force_terminal_next
                 )
             )
+            force_terminal_next = False  # consumed
             forced_choice: Optional[Dict[str, Any]] = None
             if in_endgame:
                 # Pick the first terminal tool — for the executor this is
@@ -478,7 +486,30 @@ class BaseAgent(ABC):
                     message_id=message_id,
                     partial=False,
                 )
-                return
+                # No terminal tools (plan / summary / chat agents) → text is
+                # the natural exit.
+                if not self._terminal_tool_names():
+                    return
+                # Has terminal tools (executor) → text-only is a protocol
+                # violation: the wrapper expects submit_* and will roll back
+                # if we just return. Treat as retryable — nudge with a user
+                # message and force tool_choice on the next iteration.
+                terminal_name = next(iter(self._terminal_tool_names()))
+                logger.warning(
+                    "Agent %s emitted text without %s; nudging and forcing "
+                    "tool_choice on next iter (iter=%d)",
+                    self.name, terminal_name, iteration,
+                )
+                memory.add_message(ConvMessage(
+                    role="user",
+                    content=[TextBlock(text=(
+                        f"You replied with text but the task isn't formally "
+                        f"closed. Call {terminal_name} now to submit the result."
+                    ))],
+                ))
+                await self._persist()
+                force_terminal_next = True
+                continue
 
             # Three-phase tool dispatch so independent calls run in parallel:
             # classify → emit CALLING → gather → emit CALLED in model order.

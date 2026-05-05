@@ -1,0 +1,55 @@
+# Build context exclusions — applies to ALL docker builds in this repo.
+# sandbox/Dockerfile and backend/Dockerfile both use repo root as context,
+# so without this every build ships ~400MB (UI node_modules, .git, venvs).
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Python
+**/__pycache__
+**/.venv
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/*.pyc
+**/*.pyo
+**/.tox
+**/dist
+**/build
+**/*.egg-info
+
+# Node / frontend
+**/node_modules
+ui/www/dist
+ui/www/.vite
+**/.next
+**/.turbo
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+**/*.swp
+
+# Env / secrets — never bake into images
+.env
+.env.*
+!.env.example
+*.bak
+
+# Helix runtime artefacts
+.helix
+**/pids
+**/*.log
+
+# Compose / docs / scripts (runtime config, not build inputs)
+docker-compose*.yml
+docker-compose-example.yml
+README*.md
+docs
+update_doc.sh
+mcp.json.example
+LICENSE
+ai-manus.code-workspace

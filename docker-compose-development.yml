@@ -70,8 +70,8 @@ services:
   sandbox:
     profiles: ["legacy"]
     build:
-      context: ./sandbox
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: sandbox/Dockerfile
       tags:
         - helix-sandbox:latest
     hostname: sandbox

@@ -22,23 +22,12 @@ class ProjectService:
         self._session_repository = session_repository
 
     async def list_projects(self, user_id: str) -> List[ProjectSummary]:
-        """List a user's projects.
+        """List a user's projects. Pure read — no side effects.
 
-        On first call (no projects yet), creates a default project and pulls
-        any orphaned sessions (project_id IS NULL) into it. Subsequent calls
-        are pure reads.
+        Empty list is a valid state. The default project is materialised
+        lazily by `get_default_project_id` when the user actually sends
+        their first message, not when the sidebar loads.
         """
-        summaries = await self._project_repository.find_summaries_by_user_id(user_id)
-        if summaries:
-            return summaries
-        # Lazy bootstrap.
-        default = Project(user_id=user_id, name="My Project")
-        await self._project_repository.save(default)
-        moved = await self._project_repository.backfill_null_session_project_id(
-            user_id, default.id
-        )
-        if moved:
-            logger.info("Backfilled %d ungrouped sessions into default project %s", moved, default.id)
         return await self._project_repository.find_summaries_by_user_id(user_id)
 
     async def create_project(
@@ -88,9 +77,24 @@ class ProjectService:
             raise NotFoundError("Project not found")
 
     async def get_default_project_id(self, user_id: str) -> str:
-        """Project to drop a brand-new session into when caller didn't pick one."""
-        summaries = await self.list_projects(user_id)
-        return summaries[0].id
+        """Project to drop a brand-new session into when caller didn't pick one.
+
+        Materialises the default "My Project" on first use (i.e. when the
+        user actually sends their first message). The sidebar's
+        list_projects stays a pure read so opening the page doesn't
+        create anything.
+        """
+        summaries = await self._project_repository.find_summaries_by_user_id(user_id)
+        if summaries:
+            return summaries[0].id
+        default = Project(user_id=user_id, name="My Project")
+        await self._project_repository.save(default)
+        moved = await self._project_repository.backfill_null_session_project_id(
+            user_id, default.id
+        )
+        if moved:
+            logger.info("Backfilled %d ungrouped sessions into default project %s", moved, default.id)
+        return default.id
 
     async def get_system_prompt(
         self, project_id: str, user_id: str
