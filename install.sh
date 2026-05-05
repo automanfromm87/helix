@@ -105,6 +105,13 @@ set_env_var() {
     # Use a delimiter that's unlikely to appear in URLs.
     sed -i.bak "s|^${key}=.*|${key}=${value}|" .env
   else
+    # If the file doesn't end in a newline, our appended KEY=value would
+    # glue onto the previous line (e.g. LOG_LEVEL=INFOSANDBOX_IMAGE=...).
+    # .env.example happens to ship without a trailing newline, so guard
+    # before every append.
+    if [[ -s .env ]] && [[ "$(tail -c1 .env)" != "" ]]; then
+      printf '\n' >> .env
+    fi
     printf '%s=%s\n' "$key" "$value" >> .env
   fi
 }
