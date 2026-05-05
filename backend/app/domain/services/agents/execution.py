@@ -150,6 +150,25 @@ class ExecutionAgent(BaseAgent):
                 yield event
 
             if submitted is None:
+                # Implicit-completion fallback (mirrors speedjs's
+                # `Task_done_implicit`): if the loop ended cleanly with the
+                # model's last assistant turn being free text and no
+                # tool_use, accept that text as the task's result instead
+                # of failing the task. The text was already streamed via
+                # the loop's text-only exit, so we attach `_task_result`
+                # to a sentinel MessageEvent (empty body) for the flow
+                # layer to record the structured outcome without
+                # re-rendering the same text in the UI.
+                memory = await self._ensure_memory()
+                last = memory.get_last_message()
+                if last is not None and last.role == "assistant":
+                    text = last.text()
+                    if text and not last.tool_uses():
+                        payload = TaskResult(success=True, result=text)
+                        sentinel = MessageEvent(message="")
+                        sentinel._task_result = payload.model_dump()  # type: ignore[attr-defined]
+                        yield sentinel
+                        return
                 logger.error("Task %s ended without submit_task_result", task.id)
                 yield ErrorEvent(
                     error="Executor did not submit a task result",

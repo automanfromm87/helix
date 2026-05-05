@@ -394,8 +394,13 @@ class BaseAgent(ABC):
         # ReAct loop spins to the iteration cap and then exits silently —
         # leaving the executor with no submitted result and the flow with no
         # actionable error to react to.
+        #
+        # Trigger is iteration-count only — wall-time elapsed is NOT a
+        # signal that the model is stuck, because a single slow tool call
+        # (sandbox shell, git op) can burn most of the wall-clock budget
+        # without the model misbehaving. Forcing submit_task_result while
+        # the model is mid-thought just produces a useless empty submit.
         endgame_iter_threshold = max(self.max_iterations - 2, 1)
-        endgame_walltime_threshold = self.max_walltime_seconds * 0.9
 
         # Set when an iteration ends with text-only output but the agent has
         # terminal tools — forces tool_choice on the *next* iteration so the
@@ -423,7 +428,6 @@ class BaseAgent(ABC):
                 and self._override_tool_choice is None
                 and (
                     iteration >= endgame_iter_threshold
-                    or elapsed >= endgame_walltime_threshold
                     or force_terminal_next
                 )
             )
