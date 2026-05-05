@@ -88,21 +88,6 @@ services:
     networks:
       - helix-network
 
-  mockserver:
-    build:
-      context: ./mockserver
-      dockerfile: Dockerfile
-    volumes:
-      - ./mockserver:/app  # Mount source code directory
-      - /app/__pycache__  # Avoid overwriting cache files
-      - /app/.venv  # Avoid overwriting virtual environment
-    restart: unless-stopped
-    environment:
-      - MOCK_DATA_FILE=default.yaml
-      - MOCK_DELAY=1
-    networks:
-      - helix-network
-
   postgres:
     image: postgres:16-alpine
     environment:

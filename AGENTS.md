@@ -6,14 +6,13 @@
 
 ## Project Overview
 
-AI Helix is a general-purpose AI Agent system, comprising four services:
+AI Helix is a general-purpose AI Agent system, comprising three services:
 
 | Service | Stack | Port (dev) | Entry Point |
 |---|---|---|---|
 | **Frontend** | React 18 + TypeScript, Vite 5, Tailwind CSS | 5174 | `ui/www/src/main.tsx` |
 | **Backend** | Python 3.12, FastAPI, LangChain, SQLAlchemy/asyncpg | 8000 | `backend/app/main.py` |
 | **Sandbox** | Python 3.10, FastAPI, Xvfb/Chrome/VNC | 8080 (API), 5900 (VNC) | `sandbox/app/main.py` |
-| **Mockserver** | Python, FastAPI | 8090 | `mockserver/main.py` |
 
 Infrastructure: **Postgres 16**, **Redis 7.0**, **Docker** (sandbox orchestration).
 
@@ -33,7 +32,6 @@ ai-helix/
 │       ├── core/             # Config (config.py)
 │       └── main.py
 ├── sandbox/           # Sandbox service (shell, file, supervisor APIs)
-├── mockserver/        # Mock LLM server for dev/testing
 ├── docs/              # Docsify documentation site
 ├── .cursor/skills/    # Cursor agent skills
 ├── dev.sh             # Shortcut: docker compose -f docker-compose-development.yml ...
@@ -63,7 +61,7 @@ cp .env.example .env
 ./dev.sh up -d
 ```
 
-This starts: frontend (5174), backend (8000), sandbox (8080), mockserver (8090), Postgres (5432), Redis.
+This starts: frontend (5174), backend (8000), sandbox (8080), Postgres (5432), Redis.
 
 ### Key `.env` Values for Development
 
@@ -97,13 +95,6 @@ BACKEND_URL=http://localhost:8000 npm run dev
 The Vite config creates a proxy for `/api` when `BACKEND_URL` is set.
 
 **Sandbox:** Typically Docker-only (requires Xvfb, Chrome, VNC, supervisord).
-
-**Mockserver:**
-```bash
-cd mockserver
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8090 --reload
-```
 
 ---
 
@@ -148,21 +139,12 @@ npm run build         # production build (catches TS + JSX errors)
 
 For manual UI testing: start full dev stack (`./dev.sh up -d`), open `http://localhost:5174`.
 
-### Mockserver
-
-No tests. Verify with:
-```bash
-curl -X POST http://localhost:8090/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"mock","messages":[{"role":"user","content":"hi"}]}'
-```
-
 ### Full-Stack Integration Test
 
 1. `./dev.sh up -d` — start all services
 2. Open `http://localhost:5173`
 3. Login (or bypass with `AUTH_PROVIDER=none`)
-4. Create session, send message — mockserver returns canned tool calls
+4. Create session, send message
 5. Check logs: `./dev.sh logs -f backend`
 6. Check VNC at `localhost:5902` for sandbox desktop
 
@@ -240,7 +222,6 @@ The dev compose starts the backend with **debugpy** on port `5678`. Attach a rem
 ### Resetting State
 
 - Postgres data persists in volume `helix-postgres-data`. Wipe with `./dev.sh down -v`.
-- Mockserver tracks response index; restart to reset: `./dev.sh restart mockserver`.
 
 ---
 

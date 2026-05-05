@@ -11,7 +11,6 @@
 | **Frontend** | React 18 + TypeScript, Vite | 5174 (dev) / 80 (prod) | `ui/www/src/main.tsx` |
 | **Backend** | Python 3.12, FastAPI | 8000 | `backend/app/main.py` |
 | **Sandbox** | Python 3.10, FastAPI | 8080 (API), 5900 (VNC) | `sandbox/app/main.py` |
-| **Mockserver** | Python, FastAPI | 8090 | `mockserver/main.py` |
 | **Postgres** | postgres:16-alpine | 5432 | — |
 | **Redis** | redis:7.0 | — | — |
 
@@ -36,8 +35,7 @@ To stop: `./dev.sh down`
 | `AUTH_PROVIDER` | `none` (skip login) or `local` | Controls auth; `local` uses `LOCAL_AUTH_EMAIL`/`LOCAL_AUTH_PASSWORD` |
 | `LOCAL_AUTH_EMAIL` | `admin@example.com` | Single-user local auth email |
 | `LOCAL_AUTH_PASSWORD` | `admin` | Single-user local auth password |
-| `API_BASE` | `http://mockserver:8090/v1` | Points backend at the mock LLM server |
-| `API_KEY` | any non-empty string | Required – set to anything when using mockserver |
+| `API_KEY` | real LLM key | Required for the backend to talk to the upstream model API |
 | `SEARCH_PROVIDER` | `bing_web` | No API key needed |
 | `SANDBOX_ADDRESS` | `sandbox` | Uses the single dev sandbox container |
 | `LOG_LEVEL` | `DEBUG` | Verbose logs for development |
@@ -80,17 +78,6 @@ Opens on `http://localhost:5174`. The Vite config auto-creates a proxy for `/api
 ### Sandbox
 
 The sandbox is typically used inside Docker (it runs Xvfb, Chrome, VNC via supervisord). Running it standalone requires those system dependencies.
-
-### Mockserver
-
-```bash
-cd mockserver
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8090 --reload
-```
-
-Controls: `MOCK_DATA_FILE` (default: `default.yaml`), `MOCK_DELAY` (seconds, default: `1`).  
-Mock data files live in `mockserver/mock_datas/` — switch scenarios by changing `MOCK_DATA_FILE` (options: `default.yaml`, `shell_tools.yaml`, `file_tools.yaml`, `browser_tools.yaml`, `search_tools.yaml`, `message_tools.yaml`).
 
 ---
 
@@ -142,22 +129,12 @@ npm run build         # production build (catches JSX + TS errors)
 
 For manual UI testing, start the full dev stack (`./dev.sh up -d`) and open `http://localhost:5174`.
 
-### 3.4 Mockserver
-
-The mockserver has no tests. Verify it responds:
-
-```bash
-curl -X POST http://localhost:8090/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"mock","messages":[{"role":"user","content":"hi"}]}'
-```
-
-### 3.5 Integration / End-to-End (full stack)
+### 3.4 Integration / End-to-End (full stack)
 
 1. `./dev.sh up -d` — start all services.
 2. Open `http://localhost:5173`.
 3. Login (or bypass with `AUTH_PROVIDER=none`).
-4. Create a new session, send a message — the mockserver returns canned tool calls so the agent loop runs without a real LLM.
+4. Create a new session and send a message.
 5. Check backend logs: `./dev.sh logs -f backend`.
 6. Check sandbox VNC at `localhost:5902` (dev port mapping) to see browser/desktop actions.
 
@@ -172,10 +149,6 @@ The backend container mounts `/var/run/docker.sock` (read-only) to manage sandbo
 ### Debugging the backend
 
 The dev compose starts the backend with `debugpy` listening on port `5678`. Attach a remote Python debugger (VS Code "Remote Attach" config: host `localhost`, port `5678`).
-
-### Resetting the mock server
-
-The mockserver tracks a `current_index` for sequential canned responses. It auto-resets when it receives a fresh 2-message conversation. To force-reset, restart the container: `./dev.sh restart mockserver`. The dev compose also mounts the source, so touching `mockserver/main.py` triggers an auto-reload.
 
 ### Postgres data
 
@@ -223,7 +196,6 @@ When you discover a new testing trick, environment workaround, or operational ru
 4. **Date your addition** with a short comment at the end of the new content: `<!-- Added YYYY-MM-DD: brief reason -->`.
 
 Examples of things worth adding:
-- A new mock data file was created → add it to the mockserver section.
 - A new pytest marker was introduced → add it to the backend testing section.
 - A new env var controls behavior → add it to the `.env` knobs table.
 - A workaround for a flaky test or Docker issue → add a troubleshooting subsection.

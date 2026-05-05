@@ -165,7 +165,6 @@ docker compose up -d
 * `ui/www`: Helix React 前端
 * `backend`: Helix 后端
 * `sandbox`: Helix 沙盒
-* `mockserver`: 模拟 LLM 服务（开发/测试用）
 
 ### 整体设计
 

@@ -7,7 +7,7 @@
 | Configuration | Default Value | Required | Description |
 |---------------|---------------|----------|-------------|
 | `API_KEY` | - | Yes | API key for the LLM model |
-| `API_BASE` | `http://mockserver:8090/v1` | No | Base API address for specifying model service endpoint |
+| `API_BASE` | *(empty)* | No | Base API address for specifying model service endpoint; leave empty to use the upstream default |
 
 ### Model Configuration
 

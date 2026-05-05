@@ -184,7 +184,6 @@ This project consists of the following sub-projects:
 * `ui/www`: Helix React frontend
 * `backend`: Helix backend
 * `sandbox`: Helix sandbox
-* `mockserver`: Mock LLM server (for development/testing)
 
 ### Environment Setup
 
