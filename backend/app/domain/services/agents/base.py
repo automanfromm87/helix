@@ -484,12 +484,31 @@ class BaseAgent(ABC):
                 return
 
             tool_uses = assistant.tool_uses()
-            if not tool_uses:
+            assistant_text = assistant.text()
+            # Finalize the streamed text bubble. The streaming layer emits
+            # partial=True chunks on a 300-char / 0.5s cadence, so the tail
+            # of a turn is often left unflushed and shows up in the UI as a
+            # mid-word cutoff ("No tests y"). Without a partial=False
+            # closer, the FE bubble also stays in "streaming" state forever
+            # — visible whenever the model emits text alongside tool_uses
+            # (the common ReAct shape), since the legacy finalizer below
+            # only fires in the text-only branch.
+            if assistant_text:
                 yield MessageEvent(
-                    message=assistant.text(),
+                    message=assistant_text,
                     message_id=message_id,
                     partial=False,
                 )
+            if not tool_uses:
+                if not assistant_text:
+                    # Preserve legacy behavior: still emit an (empty)
+                    # MessageEvent for the text-only no-text edge case so
+                    # downstream consumers see the closing event.
+                    yield MessageEvent(
+                        message="",
+                        message_id=message_id,
+                        partial=False,
+                    )
                 # No terminal tools (plan / summary / chat agents) → text is
                 # the natural exit.
                 if not self._terminal_tool_names():

@@ -356,6 +356,7 @@ class PlannerAgent(BaseAgent):
         self._override_terminal_tools = {tool_name}
         try:
             submitted_args: Optional[dict] = None
+            saw_error = False
             async for event in self.execute(prompt):
                 # Suppress the submit ToolEvent itself — internal protocol,
                 # not for FE display. Capture its args from CALLED.
@@ -363,10 +364,16 @@ class PlannerAgent(BaseAgent):
                     if event.status == ToolStatus.CALLED:
                         submitted_args = dict(event.function_args or {})
                     continue
+                if isinstance(event, ErrorEvent):
+                    saw_error = True
                 # Forward streaming text + everything else.
                 yield event
 
             if submitted_args is None:
+                # Real upstream error already surfaced — adding a generic
+                # "no submit_*" message would just hide the root cause.
+                if saw_error:
+                    return
                 logger.error("%s: model produced no submit_* call", tool_name)
                 yield ErrorEvent(error=error_msg)
                 return
