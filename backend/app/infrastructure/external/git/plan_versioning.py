@@ -71,6 +71,7 @@ class CommitInfo:
 
 
 _GLOBAL_SAFE_DIR_INSTALLED = False
+_GLOBAL_IDENTITY_INSTALLED = False
 
 
 async def _ensure_global_safe_directory() -> None:
@@ -101,6 +102,41 @@ async def _ensure_global_safe_directory() -> None:
         logger.exception("Failed to install global safe.directory")
 
 
+async def _ensure_global_identity() -> None:
+    """Pin a default git author identity for the backend container.
+
+    `init_repo_if_needed` writes `user.email` / `user.name` into the
+    project's local config, but only on the rare path where Helix itself
+    runs `git init`. Whenever the scaffolder (helix_scaffold / helixcli)
+    initializes the repo first, that local config is missing, and the
+    backend's `git commit` fails with "Author identity unknown" — silently
+    leaving every plan's commit_sha NULL, which collapses Fork / Variants /
+    Restore in the UI (their render gate is `commit_sha && isDone`).
+
+    Globally pinning a default in the backend container's gitconfig fixes
+    both branches and any future commit site (merge auto-save, conflict
+    resolution) without having to thread `-c user.email -c user.name` into
+    every invocation.
+    """
+    global _GLOBAL_IDENTITY_INSTALLED
+    if _GLOBAL_IDENTITY_INSTALLED:
+        return
+    try:
+        for key, value in (
+            ("user.email", "agent@helix.local"),
+            ("user.name", "Helix Agent"),
+        ):
+            proc = await asyncio.create_subprocess_exec(
+                "git", "config", "--global", key, value,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+        _GLOBAL_IDENTITY_INSTALLED = True
+    except Exception:
+        logger.exception("Failed to install global git identity")
+
+
 def _tag_for(plan_id: str) -> str:
     """Tag name convention. `helix/plan/<short>` keeps a clear namespace
     so the user's own tags don't collide and they can still `git tag -d`
@@ -120,6 +156,7 @@ async def _run_git(project_path: Path, *args: str, check: bool = True) -> tuple[
     Raises `RuntimeError` only if `check=True` and rc != 0.
     """
     await _ensure_global_safe_directory()
+    await _ensure_global_identity()
     proc = await asyncio.create_subprocess_exec(
         "git",
         "-c",
@@ -220,6 +257,7 @@ async def commit_plan(
         # is metadata, hooks are for the user's deliberate commits.
         msg = f"{plan_title}\n\nhelix-plan-id: {plan_id}\n"
         await _ensure_global_safe_directory()
+        await _ensure_global_identity()
         proc = await asyncio.create_subprocess_exec(
             "git",
             "-c",
