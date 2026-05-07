@@ -25,6 +25,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    # On podman+SELinux hosts (Fedora CoreOS in podman-machine, RHEL
+    # devservers) the bind-mounted runtime socket carries an SELinux
+    # label the unconfined container can't access. Disabling labelling
+    # for this container scopes the relaxation tightly to the one that
+    # actually needs daemon access. No-op on docker.
+    security_opt:
+      - label=disable
     command:
       [
         "uv", "run", 
@@ -35,9 +42,18 @@ services:
     volumes:
       - ./backend:/app  # Mount source code directory
       #- ./mcp.json:/etc/mcp.json # Mount MCP servers directory
-      # Docker socket is RW so the backend can spawn per-session sandbox
-      # containers via the docker SDK. (`:ro` would block create/start.)
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Container-runtime socket bind-mount. Backend talks to the host
+      # daemon (docker or podman) via the docker SDK to spawn per-session
+      # sandbox containers. RW because the SDK needs create/start.
+      # Default targets the podman socket (the project's default vendor);
+      # override HELIX_HOST_RUNTIME_SOCKET=/var/run/docker.sock when
+      # running on docker.
+      # `:U` chowns the bind-mount source to the container's user-
+      # namespace root so a rootless podman socket (owned by the machine
+      # user, not visible inside the user-namespaced container) becomes
+      # readable. Harmless on docker — `:U` is a no-op there. Reverted
+      # automatically when the container is removed.
+      - ${HELIX_HOST_RUNTIME_SOCKET:-/run/podman/podman.sock}:/var/run/docker.sock:U
       # Mirror the sandbox project bind-mount root into the backend so
       # plan-versioning can run `git` directly against the session's
       # project dir from the host's perspective. Uses the same host path
