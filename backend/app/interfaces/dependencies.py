@@ -27,7 +27,7 @@ from app.application.services.plan_service import PlanService
 from app.infrastructure.external.cache import get_cache
 
 # Sandbox + task execution
-from app.infrastructure.external.sandbox.factory import get_sandbox_cls
+from app.infrastructure.external.sandbox.docker_sandbox import DockerSandbox
 from app.infrastructure.external.task.in_memory_task import InMemoryTask
 from app.infrastructure.repositories.file_mcp_repository import FileMCPRepository
 from app.infrastructure.repositories.sql_skill_repository import SqlSkillRepository
@@ -113,7 +113,7 @@ def get_sandbox_registry() -> "SandboxRegistry":
 
     logger.info("Creating SandboxRegistry instance")
     return SandboxRegistry(
-        sandbox_cls=get_sandbox_cls(),
+        sandbox_cls=DockerSandbox,
         session_repository=get_session_repository(),
     )
 
@@ -124,7 +124,7 @@ def get_agent_service() -> AgentService:
     return AgentService(
         agent_repository=get_agent_repository(),
         session_repository=get_session_repository(),
-        sandbox_cls=get_sandbox_cls(),
+        sandbox_cls=DockerSandbox,
         task_cls=InMemoryTask,
         file_storage=get_file_storage(),
         search_engine=get_search_engine(),

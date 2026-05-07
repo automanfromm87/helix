@@ -109,15 +109,14 @@ async def _sandbox_janitor_loop(interval_seconds: int) -> None:
     a server running after the agent finishes the plan. The sandbox is only
     killed when the session itself is deleted (or never existed = true orphan).
     """
-    from app.infrastructure.external.sandbox.factory import get_sandbox_cls
+    from app.infrastructure.external.sandbox.docker_sandbox import DockerSandbox
 
-    sandbox_cls = get_sandbox_cls()
     repo = get_session_repository()
     while True:
         try:
             await asyncio.sleep(interval_seconds)
             referenced_ids = await repo.get_known_sandbox_ids()
-            reaped = await asyncio.to_thread(sandbox_cls.reap_orphans, referenced_ids)
+            reaped = await asyncio.to_thread(DockerSandbox.reap_orphans, referenced_ids)
             if reaped:
                 logger.info("Sandbox janitor reaped %d container(s)", reaped)
         except asyncio.CancelledError:
@@ -217,11 +216,10 @@ async def lifespan(app: FastAPI):
     # behind — anything labeled `helix.managed=true` not referenced by an
     # existing session is removed.
     try:
-        from app.infrastructure.external.sandbox.factory import get_sandbox_cls
+        from app.infrastructure.external.sandbox.docker_sandbox import DockerSandbox
 
-        sandbox_cls = get_sandbox_cls()
         known_ids = await get_session_repository().get_known_sandbox_ids()
-        reaped = await asyncio.to_thread(sandbox_cls.reap_orphans, known_ids)
+        reaped = await asyncio.to_thread(DockerSandbox.reap_orphans, known_ids)
         if reaped:
             logger.info("Reaped %d orphan sandbox container(s) at startup", reaped)
     except Exception as e:

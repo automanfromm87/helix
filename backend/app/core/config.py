@@ -68,20 +68,6 @@ class Settings(BaseSettings):
     postgres_dsn: str = "postgresql+asyncpg://helix:helix@postgres:5432/helix"
 
     # Sandbox configuration
-    # Container runtime backend. "podman" (default) talks to podman's
-    # docker-compatible REST socket (rootful: /run/podman/podman.sock,
-    # rootless: /run/user/$UID/podman/podman.sock); "docker" talks to
-    # the Docker daemon. Selection happens once at startup via
-    # `infrastructure.external.sandbox.factory.get_sandbox_cls()`.
-    sandbox_vendor: str = "podman"
-    # Optional explicit URL for the podman socket (e.g.
-    # "unix:///run/podman/podman.sock"). Only consulted when
-    # `sandbox_vendor == "podman"`. When empty, PodmanSandbox falls back
-    # to `docker.from_env()` — which honors `DOCKER_HOST` and otherwise
-    # uses `/var/run/docker.sock`. The simplest deployment is to
-    # bind-mount the podman socket at `/var/run/docker.sock` inside the
-    # backend container and leave this unset.
-    sandbox_podman_socket: str | None = None
     sandbox_address: str | None = None
     sandbox_image: str | None = None
     sandbox_name_prefix: str | None = None
