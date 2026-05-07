@@ -10,13 +10,14 @@ distinguish "never generated" (NULL → regen) from "generated and empty"
 
 from __future__ import annotations
 
-from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any, AsyncGenerator, Dict, List, Optional
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.domain.models.tool_result import ToolResult
 from app.domain.constants import SANDBOX_PROJECT_DIR
+from app.domain.external.llm import LLM
+from app.domain.models.tool_result import ToolResult
 from app.domain.services.workspace_surveyor import (
     SURVEYOR_SHELL_ID,
     WorkspaceSurveyor,
@@ -24,7 +25,7 @@ from app.domain.services.workspace_surveyor import (
 
 
 # ---------------------------------------------------------------------------
-# Sandbox stub
+# Fakes
 # ---------------------------------------------------------------------------
 
 
@@ -45,6 +46,35 @@ class _StubSandbox:
         return self._result
 
 
+class _FakeLLM(LLM):
+    """In-memory LLM stand-in. `complete_text_impl` lets each test
+    inject the response (return value or raised exception)."""
+
+    def __init__(self, complete_text_impl=None) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self._impl = complete_text_impl
+
+    async def complete_stream(self, **kwargs) -> AsyncGenerator[Dict[str, Any], None]:
+        if False:
+            yield  # pragma: no cover - Protocol shape only
+        raise NotImplementedError("complete_stream not used in surveyor tests")
+
+    async def complete_text(self, prompt: str, **kwargs) -> str:
+        self.calls.append((prompt, kwargs))
+        if self._impl is None:
+            return ""
+        if isinstance(self._impl, BaseException):
+            raise self._impl
+        if callable(self._impl):
+            return await self._impl(prompt, **kwargs) if hasattr(self._impl, "__await__") or _is_coro(self._impl) else self._impl(prompt, **kwargs)
+        return self._impl
+
+
+def _is_coro(fn):
+    import inspect
+    return inspect.iscoroutinefunction(fn)
+
+
 # ---------------------------------------------------------------------------
 # WorkspaceSurveyor
 # ---------------------------------------------------------------------------
@@ -54,15 +84,13 @@ class _StubSandbox:
 async def test_empty_workspace_returns_empty_string_no_llm_call() -> None:
     """find produces nothing → don't call the LLM at all."""
     sandbox = _StubSandbox(output="")
-    surveyor = WorkspaceSurveyor()
+    llm = _FakeLLM(complete_text_impl=AssertionError("LLM must not be called"))
+    surveyor = WorkspaceSurveyor(llm)
 
-    with patch(
-        "app.domain.services.workspace_surveyor.complete_text",
-        new=AsyncMock(side_effect=AssertionError("LLM must not be called")),
-    ):
-        result = await surveyor.summarize(sandbox)
+    result = await surveyor.summarize(sandbox)
 
     assert result == ""
+    assert llm.calls == []
     # Sandbox was probed exactly once with the dedicated surveyor shell id.
     assert len(sandbox.calls) == 1
     assert sandbox.calls[0][0] == SURVEYOR_SHELL_ID
@@ -74,29 +102,23 @@ async def test_non_empty_workspace_calls_llm_once() -> None:
     sandbox = _StubSandbox(
         output="=== TREE ===\n/home/ubuntu/project\n/home/ubuntu/project/package.json\n"
     )
-    surveyor = WorkspaceSurveyor()
+    llm = _FakeLLM(complete_text_impl="# Brief\n\n- src/ — code\n")
+    surveyor = WorkspaceSurveyor(llm)
 
-    fake_llm = AsyncMock(return_value="# Brief\n\n- src/ — code\n")
-    with patch(
-        "app.domain.services.workspace_surveyor.complete_text", new=fake_llm
-    ):
-        result = await surveyor.summarize(sandbox)
+    result = await surveyor.summarize(sandbox)
 
     assert result == "# Brief\n\n- src/ — code"
-    fake_llm.assert_awaited_once()
+    assert len(llm.calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_llm_failure_is_swallowed() -> None:
     """A summarizer failure must NOT propagate — planning still proceeds."""
     sandbox = _StubSandbox(output="some content")
-    surveyor = WorkspaceSurveyor()
+    llm = _FakeLLM(complete_text_impl=RuntimeError("rate limited"))
+    surveyor = WorkspaceSurveyor(llm)
 
-    with patch(
-        "app.domain.services.workspace_surveyor.complete_text",
-        new=AsyncMock(side_effect=RuntimeError("rate limited")),
-    ):
-        result = await surveyor.summarize(sandbox)
+    result = await surveyor.summarize(sandbox)
 
     assert result == ""
 
@@ -105,7 +127,7 @@ async def test_llm_failure_is_swallowed() -> None:
 async def test_exec_command_failure_is_swallowed() -> None:
     sandbox = MagicMock()
     sandbox.exec_command = AsyncMock(side_effect=RuntimeError("sandbox gone"))
-    surveyor = WorkspaceSurveyor()
+    surveyor = WorkspaceSurveyor(_FakeLLM())
 
     result = await surveyor.summarize(sandbox)
     assert result == ""
@@ -116,22 +138,16 @@ async def test_oversized_raw_is_truncated_before_llm() -> None:
     """Don't blow up the LLM payload on a megabyte of `find` output."""
     huge = "x" * 50_000
     sandbox = _StubSandbox(output=huge)
-    surveyor = WorkspaceSurveyor()
+    llm = _FakeLLM(complete_text_impl="ok")
+    surveyor = WorkspaceSurveyor(llm)
 
-    captured: dict = {}
-
-    async def fake_llm(prompt: str, **kwargs):
-        captured["prompt"] = prompt
-        return "ok"
-
-    with patch(
-        "app.domain.services.workspace_surveyor.complete_text", new=fake_llm
-    ):
-        await surveyor.summarize(sandbox)
+    await surveyor.summarize(sandbox)
 
     # Prompt body is well under the raw `huge` length — truncation kicked in.
-    assert "(truncated)" in captured["prompt"]
-    assert len(captured["prompt"]) < 25_000
+    assert len(llm.calls) == 1
+    prompt = llm.calls[0][0]
+    assert "(truncated)" in prompt
+    assert len(prompt) < 25_000
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,8 @@ from app.infrastructure.external.cache import get_cache
 # Sandbox + task execution
 from app.infrastructure.external.sandbox.docker_sandbox import DockerSandbox
 from app.infrastructure.external.task.in_memory_task import InMemoryTask
+from app.infrastructure.external.llm.anthropic_llm import AnthropicLLM
+from app.infrastructure.external.git.git_version_control import GitVersionControl
 from app.infrastructure.repositories.file_mcp_repository import FileMCPRepository
 from app.infrastructure.repositories.sql_skill_repository import SqlSkillRepository
 from app.infrastructure.skills.file_skill_repository import FileSkillRepository
@@ -119,6 +121,19 @@ def get_sandbox_registry() -> "SandboxRegistry":
 
 
 @lru_cache()
+def get_llm() -> AnthropicLLM:
+    """Process-wide LLM client. Stateless wrapper over `claude_client`,
+    cached so we don't churn instances on every request."""
+    return AnthropicLLM()
+
+
+@lru_cache()
+def get_version_control() -> GitVersionControl:
+    """Process-wide version-control client (git adapter). Stateless."""
+    return GitVersionControl()
+
+
+@lru_cache()
 def get_agent_service() -> AgentService:
     logger.info("Creating AgentService instance")
     return AgentService(
@@ -130,6 +145,8 @@ def get_agent_service() -> AgentService:
         search_engine=get_search_engine(),
         mcp_repository=FileMCPRepository(),
         plan_repository=get_plan_repository(),
+        llm=get_llm(),
+        version_control=get_version_control(),
         project_repository=get_project_repository(),
         skill_repository=get_skill_repository(),
         skill_store=get_skill_store(),

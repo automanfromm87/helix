@@ -15,12 +15,13 @@ from enum import Enum
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-from app.application.services.plan_service import PlanService
 from app.core.config import get_settings
-from app.infrastructure.external.git.plan_versioning import commit_plan
 from app.domain.external.browser import Browser
+from app.domain.external.llm import LLM
 from app.domain.external.sandbox import Sandbox
 from app.domain.external.search import SearchEngine
+from app.domain.external.version_control import VersionControl
+from app.domain.services.plan_service import PlanService
 from app.domain.models.event import (
     BaseEvent,
     DoneEvent,
@@ -83,6 +84,8 @@ class PlanActFlow(BaseFlow):
         sandbox: Sandbox,
         browser: Browser,
         mcp_tool: MCPToolkit,
+        llm: LLM,
+        version_control: VersionControl,
         search_engine: Optional[SearchEngine] = None,
         extra_system_prompt: Optional[str] = None,
         skill_repository: Optional[SkillRepository] = None,
@@ -98,7 +101,9 @@ class PlanActFlow(BaseFlow):
         )
         self._plan_repository = plan_repository
         self._sandbox = sandbox
-        self._surveyor = WorkspaceSurveyor()
+        self._llm = llm
+        self._version_control = version_control
+        self._surveyor = WorkspaceSurveyor(llm)
         self.status = FlowStatus.IDLE
         self.plan: Optional[Plan] = None
 
@@ -123,11 +128,13 @@ class PlanActFlow(BaseFlow):
         self.planner = PlannerAgent(
             agent_id=self._agent_id,
             agent_repository=self._repository,
+            llm=llm,
             tools=tools,
         )
         self.executor = ExecutionAgent(
             agent_id=self._agent_id,
             agent_repository=self._repository,
+            llm=llm,
             tools=tools,
         )
 
@@ -217,7 +224,7 @@ class PlanActFlow(BaseFlow):
                     project_path = Path(
                         get_settings().sandbox_data_host_root
                     ) / self._session_id / "project"
-                    info = await commit_plan(
+                    info = await self._version_control.commit_plan(
                         project_path, self.plan.id, self.plan.title or self.plan.goal,
                     )
                     if info:

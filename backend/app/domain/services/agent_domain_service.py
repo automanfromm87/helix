@@ -2,10 +2,13 @@ from typing import Optional, AsyncGenerator, List
 import asyncio
 import logging
 from datetime import datetime
-from app.application.errors.exceptions import NotFoundError
+from app.domain.errors.exceptions import NotFoundError
 from app.domain.models.session import Session, SessionStatus
+from app.domain.external.llm import LLM
 from app.domain.external.sandbox import Sandbox
+from app.domain.external.sandbox_provider import SandboxProvider
 from app.domain.external.search import SearchEngine
+from app.domain.external.version_control import VersionControl
 from app.domain.models.event import BaseEvent, ErrorEvent, DoneEvent, MessageEvent, WaitEvent, AgentEvent
 from pydantic import TypeAdapter
 from app.domain.repositories.agent_repository import AgentRepository
@@ -38,22 +41,23 @@ class AgentDomainService:
         file_storage: FileStorage,
         mcp_repository: MCPRepository,
         plan_repository: PlanRepository,
+        sandbox_provider: SandboxProvider,
+        llm: LLM,
+        version_control: VersionControl,
         search_engine: Optional[SearchEngine] = None,
         project_repository: Optional[ProjectRepository] = None,
         skill_repository: Optional[SkillRepository] = None,
         skill_store: Optional[SkillStore] = None,
-        sandbox_registry: Optional["SandboxRegistry"] = None,
     ):
         self._repository = agent_repository
         self._session_repository = session_repository
         self._sandbox_cls = sandbox_cls
-        # Lazy import to avoid a domain → application cycle. The registry
-        # itself only depends on domain types; the import is application-
-        # layer only because that's where the singleton lives in DI.
-        if sandbox_registry is None:
-            from app.application.services.sandbox_registry import SandboxRegistry
-            sandbox_registry = SandboxRegistry(sandbox_cls, session_repository)
-        self._sandbox_registry = sandbox_registry
+        # `sandbox_provider` is required — keeps the domain layer free of
+        # any reverse import to application. Production wiring passes the
+        # singleton SandboxRegistry; tests pass a fake.
+        self._sandbox_registry = sandbox_provider
+        self._llm = llm
+        self._version_control = version_control
         self._search_engine = search_engine
         self._task_cls = task_cls
         self._file_storage = file_storage
@@ -198,6 +202,8 @@ class AgentDomainService:
             agent_repository=self._repository,
             mcp_repository=self._mcp_repository,
             plan_repository=self._plan_repository,
+            llm=self._llm,
+            version_control=self._version_control,
             extra_system_prompt=extra_system_prompt,
             project_attachments=project_attachments,
             project_repository=self._project_repository,

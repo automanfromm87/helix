@@ -25,8 +25,8 @@ import logging
 from typing import Optional
 
 from app.domain.constants import SANDBOX_PROJECT_DIR
+from app.domain.external.llm import LLM
 from app.domain.external.sandbox import Sandbox
-from app.infrastructure.external.llm.claude_client import complete_text
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +122,10 @@ Raw context:
 class WorkspaceSurveyor:
     """Builds the `<workspace_summary>` block injected into planner prompts."""
 
-    def __init__(self, *, model: Optional[str] = None) -> None:
+    def __init__(self, llm: LLM, *, model: Optional[str] = None) -> None:
         # Smaller/faster model is fine here — the brief is stylistic, not
-        # reasoning-heavy. None = `complete_text`'s default.
+        # reasoning-heavy. None = adapter's default model.
+        self._llm = llm
         self._model = model
 
     async def summarize(self, sandbox: Sandbox) -> str:
@@ -134,7 +135,7 @@ class WorkspaceSurveyor:
         if len(raw) > _MAX_RAW_CHARS:
             raw = raw[:_MAX_RAW_CHARS] + "\n... (truncated)"
         try:
-            brief = await complete_text(
+            brief = await self._llm.complete_text(
                 _SUMMARIZE_PROMPT_TEMPLATE.format(raw=raw),
                 system=_SUMMARIZE_SYSTEM,
                 max_tokens=800,

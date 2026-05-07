@@ -23,14 +23,16 @@ from app.domain.models.event import (
     AgentEvent,
     McpToolContent,
 )
-from app.application.errors.exceptions import SandboxUnavailableError
+from app.domain.errors.exceptions import SandboxUnavailableError
 from app.domain.constants import SANDBOX_PROJECT_DIR
 from app.domain.models.plan import PlanStatus
 from app.domain.services.flows.plan_act import PlanActFlow
 from app.domain.external.sandbox import Sandbox
 from app.domain.external.browser import Browser
+from app.domain.external.llm import LLM
 from app.domain.external.search import SearchEngine
 from app.domain.external.file import FileStorage
+from app.domain.external.version_control import VersionControl
 from app.domain.repositories.agent_repository import AgentRepository
 from app.domain.external.task import TaskRunner, Task
 from app.domain.repositories.session_repository import SessionRepository
@@ -91,6 +93,8 @@ class AgentTaskRunner(TaskRunner):
         file_storage: FileStorage,
         mcp_repository: MCPRepository,
         plan_repository: PlanRepository,
+        llm: LLM,
+        version_control: VersionControl,
         search_engine: Optional[SearchEngine] = None,
         extra_system_prompt: Optional[str] = None,
         project_attachments: Optional[List[FileInfo]] = None,
@@ -127,6 +131,8 @@ class AgentTaskRunner(TaskRunner):
             self._sandbox,
             self._browser,
             self._mcp_tool,
+            llm,
+            version_control,
             self._search_engine,
             extra_system_prompt=extra_system_prompt,
             skill_repository=skill_repository,

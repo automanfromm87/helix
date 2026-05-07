@@ -42,7 +42,7 @@ from app.domain.models.conv_message import (
     ToolUseBlock,
     message_from_api,
 )
-from app.application.errors.exceptions import ServiceUnavailableError
+from app.domain.errors.exceptions import ServiceUnavailableError
 from app.domain.services.tools.base import BaseToolkit, Tool
 from app.domain.services.tools.message import ASK_USER_TOOL
 from app.domain.services.agents.protection import (
@@ -61,7 +61,7 @@ from app.domain.services.agents.protection import (
     validate_tool_input,
 )
 from app.domain.models.tool_result import ToolResult, TOOL_RESULT_SANDBOX_UNAVAILABLE
-from app.infrastructure.external.llm import complete_stream
+from app.domain.external.llm import LLM
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +159,12 @@ class BaseAgent(ABC):
         self,
         agent_id: str,
         agent_repository: AgentRepository,
+        llm: LLM,
         tools: List[BaseToolkit] = (),
     ) -> None:
         self._agent_id = agent_id
         self._repository = agent_repository
+        self._llm = llm
         self.toolkits: List[BaseToolkit] = list(tools)
         self.memory: Optional[Memory] = None
         # Memoized request payload pieces. system_prompt is class-level
@@ -833,7 +835,7 @@ class BaseAgent(ABC):
             buf: list[str] = []
             last_emit_len = 0
             payload: Optional[Dict[str, Any]] = None
-            async for chunk in complete_stream(
+            async for chunk in self._llm.complete_stream(
                 messages=api_messages,
                 system=system_blocks,
                 tools=api_tools or None,

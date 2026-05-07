@@ -14,9 +14,11 @@ from app.domain.models.event import AgentEvent
 from typing import Type
 from app.domain.models.agent import Agent
 from app.application.services.sandbox_registry import SandboxRegistry
+from app.domain.external.llm import LLM
 from app.domain.external.sandbox import Sandbox
 from app.domain.external.search import SearchEngine
 from app.domain.external.file import FileStorage
+from app.domain.external.version_control import VersionControl
 from app.domain.repositories.agent_repository import AgentRepository
 from app.domain.external.task import Task
 from app.domain.models.file import FileInfo
@@ -40,6 +42,8 @@ class AgentService:
         file_storage: FileStorage,
         mcp_repository: MCPRepository,
         plan_repository: PlanRepository,
+        llm: LLM,
+        version_control: VersionControl,
         search_engine: Optional[SearchEngine] = None,
         project_repository: Optional[ProjectRepository] = None,
         skill_repository: Optional[SkillRepository] = None,
@@ -68,11 +72,13 @@ class AgentService:
             file_storage,
             mcp_repository,
             plan_repository=plan_repository,
+            sandbox_provider=self._sandbox_registry,
+            llm=llm,
+            version_control=version_control,
             search_engine=search_engine,
             project_repository=project_repository,
             skill_repository=skill_repository,
             skill_store=skill_store,
-            sandbox_registry=self._sandbox_registry,
         )
         self._search_engine = search_engine
         self._sandbox_cls = sandbox_cls

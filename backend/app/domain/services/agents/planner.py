@@ -21,6 +21,7 @@ from app.domain.models.event import (
     ToolStatus,
 )
 from app.domain.models.message import Message
+from app.domain.external.llm import LLM
 from app.domain.repositories.agent_repository import AgentRepository
 from app.domain.services.agents.base import BaseAgent, _make_submit_tool
 from app.domain.services.prompts.planner import (
@@ -193,11 +194,13 @@ class PlannerAgent(BaseAgent):
         self,
         agent_id: str,
         agent_repository: AgentRepository,
+        llm: LLM,
         tools: List[BaseToolkit],
     ):
         super().__init__(
             agent_id=agent_id,
             agent_repository=agent_repository,
+            llm=llm,
             tools=tools,
         )
 
